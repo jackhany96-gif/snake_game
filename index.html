@@ -257,6 +257,12 @@ function show_infobox() {
             bottom: 0;
             left: 0;
             right: 0;
+
+            /* Crisp and sharp rendering on high-DPI mobile screens */
+            image-rendering: -moz-crisp-edges;
+            image-rendering: -webkit-crisp-edges;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
         }
 
         body {
