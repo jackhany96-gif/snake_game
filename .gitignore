@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local game files
+highscore.json
+
+# Pygbag web build artifacts (stored in separate gh-pages branch)
+build/
+build-cache/
+
+# Agent IDE/system folders
+.gemini/
+brain/
+walkthrough.md
+task.md
+implementation_plan.md
