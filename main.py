@@ -79,7 +79,8 @@ class SnakeGame:
         self.swipe_start_pos = None
         self.min_swipe_distance = 25
         self.name_input_index = 0
-        self.show_dpad = True
+        self.device_type = self.detect_device()
+        self.show_dpad = (self.device_type == "Mobile")
         self.particles = []
         self.screen_shake = 0
 
@@ -137,6 +138,28 @@ class SnakeGame:
             if food_pos not in self.snake:
                 self.food = food_pos
                 break
+
+    def detect_device(self):
+        """Detect device type using browser navigator APIs when running in Pygbag."""
+        try:
+            import platform
+            navigator = platform.window.navigator
+            user_agent = navigator.userAgent.lower()
+            
+            # Check for mobile keywords
+            mobile_keywords = ["android", "webos", "iphone", "ipad", "ipod", "blackberry", "iemobile", "opera mini", "mobile"]
+            is_mobile_ua = any(kw in user_agent for kw in mobile_keywords)
+            
+            # Check for touch capability
+            is_touch = navigator.maxTouchPoints > 0
+            
+            if is_mobile_ua or is_touch:
+                return "Mobile"
+            else:
+                return "Desktop"
+        except Exception:
+            # Running natively on desktop Python
+            return "Desktop"
 
     def get_board_offsets(self):
         screen_w, screen_h = self.screen.get_size()
@@ -233,7 +256,7 @@ class SnakeGame:
                 self.screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 self.swipe_start_pos = event.pos
-                self.show_dpad = True  # Show D-pad because user tapped the screen
+                self.show_dpad = (self.device_type == "Mobile")
                 
                 # Check for click on virtual buttons
                 screen_w, screen_h = self.screen.get_size()
@@ -244,7 +267,7 @@ class SnakeGame:
                     v_height = 490
                 else:
                     v_width = 400
-                    v_height = 610
+                    v_height = 610 if self.show_dpad else 490
                 
                 scale = min(screen_w / v_width, screen_h / v_height)
                 offset_x = (screen_w - v_width * scale) // 2
@@ -257,7 +280,7 @@ class SnakeGame:
                     self.reset_game()
                     return
                     
-                button = self.get_clicked_button(vx, vy)
+                button = self.get_clicked_button(vx, vy) if self.show_dpad else None
                 if button:
                     if self.inputting_name:
                         if button == "UP":
@@ -285,7 +308,7 @@ class SnakeGame:
                             elif button == "RIGHT":
                                 self.handle_direction_change(Direction.RIGHT)
             elif event.type == pygame.MOUSEBUTTONUP:
-                if self.swipe_start_pos:
+                if self.swipe_start_pos and self.device_type == "Mobile":
                     end_pos = event.pos
                     dx = end_pos[0] - self.swipe_start_pos[0]
                     dy = end_pos[1] - self.swipe_start_pos[1]
@@ -300,7 +323,8 @@ class SnakeGame:
                         self.handle_direction_change(new_dir)
                     self.swipe_start_pos = None
             elif event.type == pygame.KEYDOWN:
-                self.show_dpad = False  # Hide D-pad because user pressed a key
+                # Key presses disable D-pad on desktop or keep it off
+                self.show_dpad = (self.device_type == "Mobile")
                 
                 if event.key in (pygame.K_f, pygame.K_F11):
                     pygame.display.toggle_fullscreen()
@@ -416,7 +440,6 @@ class SnakeGame:
             fx = bx + self.food.x * CELL_SIZE + CELL_SIZE // 2
             fy = by + self.food.y * CELL_SIZE + CELL_SIZE // 2
             self.spawn_particles(fx, fy, RED)
-            self.screen_shake = 3
             self.spawn_food()
             self.update_speed()
             if self.score > self.high_score:
@@ -430,7 +453,6 @@ class SnakeGame:
             gx = bx + self.golden_food.x * CELL_SIZE + CELL_SIZE // 2
             gy = by + self.golden_food.y * CELL_SIZE + CELL_SIZE // 2
             self.spawn_particles(gx, gy, GOLD)
-            self.screen_shake = 6
             self.golden_food = None
             self.golden_food_timer = 0
             self.update_speed()
@@ -587,30 +609,11 @@ class SnakeGame:
             if p["life"] <= 0:
                 self.particles.remove(p)
 
-        # 2. Get dynamic theme colors based on score
-        level = self.score // 30
-        if level == 0:
-            bg_color = DARK_BG
-            grid_color = GRID_COLOR
-            border_c = BORDER_COLOR
-            theme_gold = GOLD
-        elif level == 1:
-            bg_color = (20, 30, 20)
-            grid_color = (30, 45, 30)
-            border_c = LIGHT_GREEN
-            theme_gold = (255, 100, 100)
-        elif level == 2:
-            bg_color = (30, 20, 30)
-            grid_color = (45, 30, 45)
-            border_c = (200, 100, 255)
-            theme_gold = GOLD
-        else:
-            pulse = (pygame.time.get_ticks() // 200) % 6
-            rainbows = [RED, GOLD, GREEN, BLUE, (255, 0, 255), (0, 255, 255)]
-            bg_color = (20, 20, 30)
-            grid_color = (30, 30, 45)
-            border_c = rainbows[pulse]
-            theme_gold = rainbows[(pulse + 2) % 6]
+        # 2. Use clean static colors (no color flashing)
+        bg_color = DARK_BG
+        grid_color = GRID_COLOR
+        border_c = BORDER_COLOR
+        theme_gold = GOLD
 
         # Fill background
         v_screen.fill(BAR_BG)
