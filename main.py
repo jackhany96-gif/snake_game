@@ -14,9 +14,10 @@ GRID_SIZE = 20
 CELL_SIZE = 20
 WINDOW_WIDTH = GRID_SIZE * CELL_SIZE
 HEADER_HEIGHT = 60
+CONTROLLER_HEIGHT = 120
 FOOTER_HEIGHT = 30
 PLAY_ZONE_HEIGHT = GRID_SIZE * CELL_SIZE
-WINDOW_HEIGHT = PLAY_ZONE_HEIGHT + HEADER_HEIGHT + FOOTER_HEIGHT
+WINDOW_HEIGHT = PLAY_ZONE_HEIGHT + HEADER_HEIGHT + CONTROLLER_HEIGHT + FOOTER_HEIGHT
 INITIAL_FPS = 5
 MAX_FPS = 15
 
@@ -74,6 +75,11 @@ class SnakeGame:
         self.golden_food = None
         self.golden_food_timer = 0
 
+        # Swipe and touch controls
+        self.swipe_start_pos = None
+        self.min_swipe_distance = 25
+        self.name_input_index = 0
+
         # Movement and rendering states
         self.input_queue = []
         self.prev_snake = list(self.snake)
@@ -129,48 +135,168 @@ class SnakeGame:
                 self.food = food_pos
                 break
 
+    def get_clicked_button(self, vx, vy):
+        cx = 120
+        cy = HEADER_HEIGHT + PLAY_ZONE_HEIGHT + CONTROLLER_HEIGHT // 2  # 520
+        
+        # Check DPAD buttons
+        if pygame.Rect(cx - 20, cy - 45, 40, 25).collidepoint(vx, vy):
+            return "UP"
+        if pygame.Rect(cx - 20, cy + 20, 40, 25).collidepoint(vx, vy):
+            return "DOWN"
+        if pygame.Rect(cx - 45, cy - 20, 25, 40).collidepoint(vx, vy):
+            return "LEFT"
+        if pygame.Rect(cx + 20, cy - 20, 25, 40).collidepoint(vx, vy):
+            return "RIGHT"
+            
+        # Check Pause button
+        px = 280
+        py = cy
+        if pygame.Rect(px - 35, py - 20, 70, 40).collidepoint(vx, vy):
+            return "PAUSE"
+            
+        return None
+
+    def change_input_letter(self, amount):
+        if len(self.input_name) < 3:
+            self.input_name = (self.input_name + "AAA")[:3]
+        char_list = list(self.input_name)
+        curr_char = char_list[self.name_input_index]
+        new_ord = ord(curr_char) + amount
+        if new_ord < ord('A'):
+            new_ord = ord('Z')
+        elif new_ord > ord('Z'):
+            new_ord = ord('A')
+        char_list[self.name_input_index] = chr(new_ord)
+        self.input_name = "".join(char_list)
+
+    def submit_name(self):
+        if len(self.input_name) == 3:
+            self.leaderboard.append({"name": self.input_name, "score": self.score})
+            self.leaderboard.sort(key=lambda x: x["score"], reverse=True)
+            self.leaderboard = self.leaderboard[:5]
+            self.save_leaderboard()
+            self.inputting_name = False
+
+    def handle_direction_change(self, new_dir):
+        if self.paused or self.is_game_over or self.inputting_name:
+            return
+        ref_dir = self.input_queue[-1] if self.input_queue else self.direction
+        is_opposite = (
+            (new_dir == Direction.RIGHT and ref_dir == Direction.LEFT) or
+            (new_dir == Direction.LEFT and ref_dir == Direction.RIGHT) or
+            (new_dir == Direction.UP and ref_dir == Direction.DOWN) or
+            (new_dir == Direction.DOWN and ref_dir == Direction.UP)
+        )
+        if not is_opposite and len(self.input_queue) < 2:
+            self.input_queue.append(new_dir)
+
     def handle_events(self):
-        """Handle keyboard input and window close."""
+        """Handle keyboard/mouse/touch input and window close."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.VIDEORESIZE:
                 self.screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                self.swipe_start_pos = event.pos
+                
+                # Check for click on virtual buttons
+                screen_w, screen_h = self.screen.get_size()
+                scale = min(screen_w / WINDOW_WIDTH, screen_h / WINDOW_HEIGHT)
+                offset_x = (screen_w - WINDOW_WIDTH * scale) // 2
+                offset_y = (screen_h - WINDOW_HEIGHT * scale) // 2
+                
+                vx = (event.pos[0] - offset_x) / scale
+                vy = (event.pos[1] - offset_y) / scale
+                
+                if self.is_game_over:
+                    self.reset_game()
+                    return
+                    
+                button = self.get_clicked_button(vx, vy)
+                if button:
+                    if self.inputting_name:
+                        if button == "UP":
+                            self.change_input_letter(1)
+                        elif button == "DOWN":
+                            self.change_input_letter(-1)
+                        elif button == "LEFT":
+                            self.name_input_index = (self.name_input_index - 1) % 3
+                        elif button == "RIGHT":
+                            self.name_input_index = (self.name_input_index + 1) % 3
+                        elif button == "PAUSE":
+                            self.submit_name()
+                    else:
+                        if button == "PAUSE":
+                            self.paused = not self.paused
+                            if not self.paused:
+                                self.last_update_time = pygame.time.get_ticks()
+                        elif not self.paused:
+                            if button == "UP":
+                                self.handle_direction_change(Direction.UP)
+                            elif button == "DOWN":
+                                self.handle_direction_change(Direction.DOWN)
+                            elif button == "LEFT":
+                                self.handle_direction_change(Direction.LEFT)
+                            elif button == "RIGHT":
+                                self.handle_direction_change(Direction.RIGHT)
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if self.swipe_start_pos:
+                    end_pos = event.pos
+                    dx = end_pos[0] - self.swipe_start_pos[0]
+                    dy = end_pos[1] - self.swipe_start_pos[1]
+                    dist = math.hypot(dx, dy)
+                    
+                    if dist > self.min_swipe_distance:
+                        # Swipe detected!
+                        if abs(dx) > abs(dy):
+                            new_dir = Direction.RIGHT if dx > 0 else Direction.LEFT
+                        else:
+                            new_dir = Direction.DOWN if dy > 0 else Direction.UP
+                        self.handle_direction_change(new_dir)
+                    self.swipe_start_pos = None
             elif event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_f, pygame.K_F11):
                     pygame.display.toggle_fullscreen()
                     return
-
+ 
                 if self.inputting_name:
                     if event.key == pygame.K_BACKSPACE:
                         self.input_name = self.input_name[:-1]
                     elif event.key == pygame.K_RETURN:
-                        if len(self.input_name) == 3:
-                            self.leaderboard.append({"name": self.input_name, "score": self.score})
-                            self.leaderboard.sort(key=lambda x: x["score"], reverse=True)
-                            self.leaderboard = self.leaderboard[:5]
-                            self.save_leaderboard()
-                            self.inputting_name = False
+                        self.submit_name()
+                    elif event.key == pygame.K_LEFT:
+                        self.name_input_index = (self.name_input_index - 1) % 3
+                    elif event.key == pygame.K_RIGHT:
+                        self.name_input_index = (self.name_input_index + 1) % 3
+                    elif event.key in (pygame.K_UP, pygame.K_w):
+                        self.change_input_letter(1)
+                    elif event.key in (pygame.K_DOWN, pygame.K_s):
+                        self.change_input_letter(-1)
                     else:
                         char = event.unicode
                         if char.isalnum() and len(self.input_name) < 3:
-                            self.input_name += char.upper()
+                            char_list = list(self.input_name + "   ")[:3]
+                            char_list[self.name_input_index] = char.upper()
+                            self.input_name = "".join(char_list).strip()
+                            self.name_input_index = (self.name_input_index + 1) % 3
                     return
-
+ 
                 if self.is_game_over:
                     if event.key in (pygame.K_RETURN, pygame.K_SPACE):
                         self.reset_game()
                     return
-
+ 
                 if event.key in (pygame.K_p, pygame.K_ESCAPE):
                     self.paused = not self.paused
                     if not self.paused:
                         self.last_update_time = pygame.time.get_ticks()
                     return
-
+ 
                 if self.paused:
                     return
-
+ 
                 new_dir = None
                 if event.key in (pygame.K_RIGHT, pygame.K_d):
                     new_dir = Direction.RIGHT
@@ -180,18 +306,9 @@ class SnakeGame:
                     new_dir = Direction.LEFT
                 elif event.key in (pygame.K_UP, pygame.K_w):
                     new_dir = Direction.UP
-
+ 
                 if new_dir is not None:
-                    # Find reference direction (last in queue or current)
-                    ref_dir = self.input_queue[-1] if self.input_queue else self.direction
-                    is_opposite = (
-                        (new_dir == Direction.RIGHT and ref_dir == Direction.LEFT) or
-                        (new_dir == Direction.LEFT and ref_dir == Direction.RIGHT) or
-                        (new_dir == Direction.UP and ref_dir == Direction.DOWN) or
-                        (new_dir == Direction.DOWN and ref_dir == Direction.UP)
-                    )
-                    if not is_opposite and len(self.input_queue) < 2:
-                        self.input_queue.append(new_dir)
+                    self.handle_direction_change(new_dir)
 
     def update_speed(self):
         """Update game speed based on score."""
@@ -287,7 +404,8 @@ class SnakeGame:
         # Check if score qualifies for Top 5 leaderboard
         if len(self.leaderboard) < 5 or self.score > self.leaderboard[-1]["score"]:
             self.inputting_name = True
-            self.input_name = ""
+            self.input_name = "AAA"
+            self.name_input_index = 0
         self.is_game_over = True
 
     def reset_game(self):
@@ -491,74 +609,146 @@ class SnakeGame:
         speed_text = self.small_font.render(f"Speed: {self.current_fps} FPS", True, TEXT_LIGHT)
         self.virtual_screen.blit(speed_text, (WINDOW_WIDTH // 2 - speed_text.get_width() // 2, 20))
 
-        # 3. Draw Bottom Footer Bar Text
+        # 3. Draw Bottom Controller Area
+        controller_y = HEADER_HEIGHT + PLAY_ZONE_HEIGHT
+        pygame.draw.rect(self.virtual_screen, BAR_BG, (0, controller_y, WINDOW_WIDTH, CONTROLLER_HEIGHT))
+        pygame.draw.line(self.virtual_screen, BORDER_COLOR, (0, controller_y), (WINDOW_WIDTH, controller_y), 1)
+
+        # Draw D-PAD
+        cx = 120
+        cy = controller_y + CONTROLLER_HEIGHT // 2  # 520
+        
+        # Determine colors (highlight active direction if not paused/gameover/nameinput)
+        up_color = GREEN if (self.direction == Direction.UP and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+        down_color = GREEN if (self.direction == Direction.DOWN and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+        left_color = GREEN if (self.direction == Direction.LEFT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+        right_color = GREEN if (self.direction == Direction.RIGHT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+        
+        # Draw background cross
+        pygame.draw.rect(self.virtual_screen, (30, 30, 30), (cx - 45, cy - 45, 90, 90), 0, 10)
+        pygame.draw.circle(self.virtual_screen, (40, 40, 40), (cx, cy), 15)
+
+        # Draw button shapes (rounded corners)
+        pygame.draw.rect(self.virtual_screen, up_color, (cx - 20, cy - 45, 40, 25), 0, 4)
+        pygame.draw.rect(self.virtual_screen, down_color, (cx - 20, cy + 20, 40, 25), 0, 4)
+        pygame.draw.rect(self.virtual_screen, left_color, (cx - 45, cy - 20, 25, 40), 0, 4)
+        pygame.draw.rect(self.virtual_screen, right_color, (cx + 20, cy - 20, 25, 40), 0, 4)
+        
+        # Draw button borders
+        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, (cx - 20, cy - 45, 40, 25), 1, 4)
+        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, (cx - 20, cy + 20, 40, 25), 1, 4)
+        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, (cx - 45, cy - 20, 25, 40), 1, 4)
+        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, (cx + 20, cy - 20, 25, 40), 1, 4)
+
+        # Draw arrow indicators (polygons/triangles)
+        # Up
+        pygame.draw.polygon(self.virtual_screen, TEXT_LIGHT, [(cx, cy - 40), (cx - 8, cy - 26), (cx + 8, cy - 26)])
+        # Down
+        pygame.draw.polygon(self.virtual_screen, TEXT_LIGHT, [(cx, cy + 40), (cx - 8, cy + 26), (cx + 8, cy + 26)])
+        # Left
+        pygame.draw.polygon(self.virtual_screen, TEXT_LIGHT, [(cx - 40, cy), (cx - 26, cy - 8), (cx - 26, cy + 8)])
+        # Right
+        pygame.draw.polygon(self.virtual_screen, TEXT_LIGHT, [(cx + 40, cy), (cx + 26, cy - 8), (cx + 26, cy + 8)])
+
+        # Draw Action/Pause button
+        px = 280
+        py = cy
+        pause_button_rect = pygame.Rect(px - 35, py - 20, 70, 40)
+        
+        # Decide color and label for Pause/Action button
+        if self.inputting_name:
+            action_color = GOLD
+            action_label = "OK"
+        elif self.is_game_over:
+            action_color = GREEN
+            action_label = "PLAY"
+        elif self.paused:
+            action_color = GREEN
+            action_label = "RESUME"
+        else:
+            action_color = RED
+            action_label = "PAUSE"
+            
+        pygame.draw.rect(self.virtual_screen, action_color, pause_button_rect, 0, 8)
+        pygame.draw.rect(self.virtual_screen, TEXT_LIGHT, pause_button_rect, 2, 8)
+        
+        action_text_surf = self.small_font.render(action_label, True, BLACK if action_color in (GOLD, GREEN) else TEXT_LIGHT)
+        self.virtual_screen.blit(action_text_surf, (px - action_text_surf.get_width() // 2, py - action_text_surf.get_height() // 2))
+
+        # 4. Draw Bottom Footer Bar Text
         instructions = self.footer_font.render(
-            "WASD/Arrows: Move  |  P: Pause  |  Gold: Shrinks & +30 pt",
+            "Swipe/D-Pad/Keys: Move | Pause/Tap Screen to Control",
             True,
             TEXT_LIGHT,
         )
         self.virtual_screen.blit(
-            instructions, (WINDOW_WIDTH // 2 - instructions.get_width() // 2, HEADER_HEIGHT + PLAY_ZONE_HEIGHT + 7)
+            instructions, (WINDOW_WIDTH // 2 - instructions.get_width() // 2, controller_y + CONTROLLER_HEIGHT + 7)
         )
 
-        # 4. Draw Dialogue Card Overlays (Centered over Play Zone)
+        # 5. Draw Dialogue Card Overlays (Centered over Play Zone)
         
         # Draw Pause Card
         if self.paused:
             card_width = 260
             card_height = 100
-            cx = WINDOW_WIDTH // 2 - card_width // 2
-            cy = HEADER_HEIGHT + PLAY_ZONE_HEIGHT // 2 - card_height // 2
+            cx_card = WINDOW_WIDTH // 2 - card_width // 2
+            cy_card = HEADER_HEIGHT + PLAY_ZONE_HEIGHT // 2 - card_height // 2
 
             card_surface = pygame.Surface((card_width, card_height))
             card_surface.fill((15, 15, 15))
             pygame.draw.rect(card_surface, GOLD, (0, 0, card_width, card_height), 2)
 
             pause_text = self.font.render("PAUSED", True, GOLD)
-            resume_text = self.small_font.render("Press P or ESC to Resume", True, TEXT_LIGHT)
+            resume_text = self.small_font.render("Tap RESUME or P to Play", True, TEXT_LIGHT)
 
             card_surface.blit(pause_text, (card_width // 2 - pause_text.get_width() // 2, 20))
             card_surface.blit(resume_text, (card_width // 2 - resume_text.get_width() // 2, 55))
 
-            self.virtual_screen.blit(card_surface, (cx, cy))
+            self.virtual_screen.blit(card_surface, (cx_card, cy_card))
 
         # Draw Name Input Card
         elif self.inputting_name:
             card_width = 280
             card_height = 180
-            cx = WINDOW_WIDTH // 2 - card_width // 2
-            cy = HEADER_HEIGHT + PLAY_ZONE_HEIGHT // 2 - card_height // 2
+            cx_card = WINDOW_WIDTH // 2 - card_width // 2
+            cy_card = HEADER_HEIGHT + PLAY_ZONE_HEIGHT // 2 - card_height // 2
 
             card_surface = pygame.Surface((card_width, card_height))
             card_surface.fill((15, 15, 15))
             pygame.draw.rect(card_surface, GOLD, (0, 0, card_width, card_height), 2)
 
             title_text = self.font.render("NEW HIGH SCORE!", True, GOLD)
-            prompt_text = self.small_font.render("Enter 3-Letter Name:", True, TEXT_LIGHT)
+            prompt_text = self.small_font.render("D-Pad Up/Down to cycle, L/R to move:", True, TEXT_LIGHT)
             
-            chars_display = ""
+            # Render individual characters with active indicator
             for idx in range(3):
-                if idx < len(self.input_name):
-                    chars_display += self.input_name[idx] + "  "
-                else:
-                    chars_display += "_  "
-            chars_display = chars_display.strip()
-            name_text = self.font.render(chars_display, True, GREEN)
-            submit_text = self.small_font.render("Press ENTER to Submit", True, TEXT_LIGHT)
+                char = self.input_name[idx] if idx < len(self.input_name) else "_"
+                char_color = GOLD if idx == self.name_input_index else GREEN
+                char_surf = self.font.render(char, True, char_color)
+                # Position them: centered around card_width // 2
+                # Spacing of 30 pixels: index 0 at -30, index 1 at 0, index 2 at +30
+                pos_x = card_width // 2 - char_surf.get_width() // 2 + (idx - 1) * 30
+                pos_y = 90
+                card_surface.blit(char_surf, (pos_x, pos_y))
+                
+                # Draw underline for active character
+                if idx == self.name_input_index:
+                    pygame.draw.line(card_surface, GOLD, (pos_x, pos_y + char_surf.get_height() + 2), (pos_x + char_surf.get_width(), pos_y + char_surf.get_height() + 2), 2)
+                    
+            submit_text = self.small_font.render("Click OK or Press ENTER", True, TEXT_LIGHT)
 
-            card_surface.blit(title_text, (card_width // 2 - title_text.get_width() // 2, 20))
-            card_surface.blit(prompt_text, (card_width // 2 - prompt_text.get_width() // 2, 55))
-            card_surface.blit(name_text, (card_width // 2 - name_text.get_width() // 2, 90))
-            card_surface.blit(submit_text, (card_width // 2 - submit_text.get_width() // 2, 135))
+            card_surface.blit(title_text, (card_width // 2 - title_text.get_width() // 2, 15))
+            card_surface.blit(prompt_text, (card_width // 2 - prompt_text.get_width() // 2, 50))
+            card_surface.blit(submit_text, (card_width // 2 - submit_text.get_width() // 2, 140))
 
-            self.virtual_screen.blit(card_surface, (cx, cy))
+            self.virtual_screen.blit(card_surface, (cx_card, cy_card))
 
         # Draw Game Over Card
         elif self.is_game_over:
             card_width = 300
             card_height = 280
-            cx = WINDOW_WIDTH // 2 - card_width // 2
-            cy = HEADER_HEIGHT + PLAY_ZONE_HEIGHT // 2 - card_height // 2
+            cx_card = WINDOW_WIDTH // 2 - card_width // 2
+            cy_card = HEADER_HEIGHT + PLAY_ZONE_HEIGHT // 2 - card_height // 2
 
             card_surface = pygame.Surface((card_width, card_height))
             card_surface.fill((15, 15, 15))
@@ -583,10 +773,10 @@ class SnakeGame:
                 entry_text = self.small_font.render(entry_str, True, entry_color)
                 card_surface.blit(entry_text, (card_width // 2 - 60, start_y + index * 22))
 
-            restart_text = self.small_font.render("Press ENTER or SPACE to Restart", True, TEXT_LIGHT)
+            restart_text = self.small_font.render("Tap screen or Press ENTER to play", True, TEXT_LIGHT)
             card_surface.blit(restart_text, (card_width // 2 - restart_text.get_width() // 2, 230))
 
-            self.virtual_screen.blit(card_surface, (cx, cy))
+            self.virtual_screen.blit(card_surface, (cx_card, cy_card))
 
         # 5. Aspect-ratio aware scaling to actual window size
         screen_w, screen_h = self.screen.get_size()
