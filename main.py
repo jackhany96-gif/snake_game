@@ -79,6 +79,9 @@ class SnakeGame:
         self.swipe_start_pos = None
         self.min_swipe_distance = 25
         self.name_input_index = 0
+        self.show_dpad = True
+        self.particles = []
+        self.screen_shake = 0
 
         # Movement and rendering states
         self.input_queue = []
@@ -135,9 +138,41 @@ class SnakeGame:
                 self.food = food_pos
                 break
 
+    def get_board_offsets(self):
+        screen_w, screen_h = self.screen.get_size()
+        is_landscape = self.show_dpad and (screen_w > screen_h)
+        if is_landscape:
+            return 120, HEADER_HEIGHT
+        else:
+            return 0, HEADER_HEIGHT
+
+    def spawn_particles(self, x, y, color):
+        for _ in range(15):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(1.0, 3.5)
+            self.particles.append({
+                "x": x,
+                "y": y,
+                "vx": math.cos(angle) * speed,
+                "vy": math.sin(angle) * speed,
+                "color": color,
+                "life": random.randint(10, 25)
+            })
+
     def get_clicked_button(self, vx, vy):
-        cx = 120
-        cy = HEADER_HEIGHT + PLAY_ZONE_HEIGHT + CONTROLLER_HEIGHT // 2  # 520
+        screen_w, screen_h = self.screen.get_size()
+        is_landscape = self.show_dpad and (screen_w > screen_h)
+        
+        if is_landscape:
+            cx = 60
+            cy = 245
+            px = 580
+            py = 245
+        else:
+            cx = 120
+            cy = HEADER_HEIGHT + PLAY_ZONE_HEIGHT + CONTROLLER_HEIGHT // 2  # 520
+            px = 280
+            py = cy
         
         # Check DPAD buttons
         if pygame.Rect(cx - 20, cy - 45, 40, 25).collidepoint(vx, vy):
@@ -150,8 +185,6 @@ class SnakeGame:
             return "RIGHT"
             
         # Check Pause button
-        px = 280
-        py = cy
         if pygame.Rect(px - 35, py - 20, 70, 40).collidepoint(vx, vy):
             return "PAUSE"
             
@@ -200,12 +233,22 @@ class SnakeGame:
                 self.screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 self.swipe_start_pos = event.pos
+                self.show_dpad = True  # Show D-pad because user tapped the screen
                 
                 # Check for click on virtual buttons
                 screen_w, screen_h = self.screen.get_size()
-                scale = min(screen_w / WINDOW_WIDTH, screen_h / WINDOW_HEIGHT)
-                offset_x = (screen_w - WINDOW_WIDTH * scale) // 2
-                offset_y = (screen_h - WINDOW_HEIGHT * scale) // 2
+                is_landscape = self.show_dpad and (screen_w > screen_h)
+                
+                if is_landscape:
+                    v_width = 640
+                    v_height = 490
+                else:
+                    v_width = 400
+                    v_height = 610
+                
+                scale = min(screen_w / v_width, screen_h / v_height)
+                offset_x = (screen_w - v_width * scale) // 2
+                offset_y = (screen_h - v_height * scale) // 2
                 
                 vx = (event.pos[0] - offset_x) / scale
                 vy = (event.pos[1] - offset_y) / scale
@@ -257,6 +300,8 @@ class SnakeGame:
                         self.handle_direction_change(new_dir)
                     self.swipe_start_pos = None
             elif event.type == pygame.KEYDOWN:
+                self.show_dpad = False  # Hide D-pad because user pressed a key
+                
                 if event.key in (pygame.K_f, pygame.K_F11):
                     pygame.display.toggle_fullscreen()
                     return
@@ -354,6 +399,11 @@ class SnakeGame:
 
         # Check collision with itself
         if new_head in self.snake:
+            bx, by = self.get_board_offsets()
+            head_x = bx + new_head.x * CELL_SIZE + CELL_SIZE // 2
+            head_y = by + new_head.y * CELL_SIZE + CELL_SIZE // 2
+            self.spawn_particles(head_x, head_y, GREEN)
+            self.screen_shake = 12
             self.game_over()
             return
 
@@ -362,6 +412,11 @@ class SnakeGame:
         # Check if snake ate food
         if new_head == self.food:
             self.score += 10
+            bx, by = self.get_board_offsets()
+            fx = bx + self.food.x * CELL_SIZE + CELL_SIZE // 2
+            fy = by + self.food.y * CELL_SIZE + CELL_SIZE // 2
+            self.spawn_particles(fx, fy, RED)
+            self.screen_shake = 3
             self.spawn_food()
             self.update_speed()
             if self.score > self.high_score:
@@ -371,6 +426,11 @@ class SnakeGame:
                 self.spawn_golden_apple()
         elif self.golden_food and new_head == self.golden_food:
             self.score += 30
+            bx, by = self.get_board_offsets()
+            gx = bx + self.golden_food.x * CELL_SIZE + CELL_SIZE // 2
+            gy = by + self.golden_food.y * CELL_SIZE + CELL_SIZE // 2
+            self.spawn_particles(gx, gy, GOLD)
+            self.screen_shake = 6
             self.golden_food = None
             self.golden_food_timer = 0
             self.update_speed()
@@ -384,6 +444,7 @@ class SnakeGame:
             self.snake.pop()
 
         if wall_hit:
+            self.screen_shake = 5
             print(f"Hit wall! Score: {self.score}, Speed: {self.current_fps}")
 
     def spawn_golden_apple(self):
@@ -500,18 +561,68 @@ class SnakeGame:
             pygame.draw.circle(g, LIGHT_GREEN if not is_last else WHITE, (center_x - 1, center_y - 1), radius - 3, 1)
 
     def draw(self):
-        """Draw the game."""
-        # 1. Fill base virtual window background
-        self.virtual_screen.fill(BAR_BG)
+        """Draw the game dynamically based on viewport, theme, and animations."""
+        # 1. Determine orientation and dynamic virtual size
+        screen_w, screen_h = self.screen.get_size()
+        is_landscape = self.show_dpad and (screen_w > screen_h)
+        
+        if is_landscape:
+            v_width = 640
+            v_height = 490
+            board_offset_x = 120
+            board_offset_y = HEADER_HEIGHT
+        else:
+            v_width = 400
+            v_height = 610 if self.show_dpad else 490
+            board_offset_x = 0
+            board_offset_y = HEADER_HEIGHT
+
+        v_screen = pygame.Surface((v_width, v_height))
+
+        # Update active particles
+        for p in self.particles[:]:
+            p["x"] += p["vx"]
+            p["y"] += p["vy"]
+            p["life"] -= 1
+            if p["life"] <= 0:
+                self.particles.remove(p)
+
+        # 2. Get dynamic theme colors based on score
+        level = self.score // 30
+        if level == 0:
+            bg_color = DARK_BG
+            grid_color = GRID_COLOR
+            border_c = BORDER_COLOR
+            theme_gold = GOLD
+        elif level == 1:
+            bg_color = (20, 30, 20)
+            grid_color = (30, 45, 30)
+            border_c = LIGHT_GREEN
+            theme_gold = (255, 100, 100)
+        elif level == 2:
+            bg_color = (30, 20, 30)
+            grid_color = (45, 30, 45)
+            border_c = (200, 100, 255)
+            theme_gold = GOLD
+        else:
+            pulse = (pygame.time.get_ticks() // 200) % 6
+            rainbows = [RED, GOLD, GREEN, BLUE, (255, 0, 255), (0, 255, 255)]
+            bg_color = (20, 20, 30)
+            grid_color = (30, 30, 45)
+            border_c = rainbows[pulse]
+            theme_gold = rainbows[(pulse + 2) % 6]
+
+        # Fill background
+        v_screen.fill(BAR_BG)
 
         # Draw Play Zone Background
-        pygame.draw.rect(self.virtual_screen, DARK_BG, (0, HEADER_HEIGHT, WINDOW_WIDTH, PLAY_ZONE_HEIGHT))
+        pygame.draw.rect(v_screen, bg_color, (board_offset_x, board_offset_y, PLAY_ZONE_HEIGHT, PLAY_ZONE_HEIGHT))
 
         # Draw play zone grid lines
         for x in range(GRID_SIZE):
-            pygame.draw.line(self.virtual_screen, GRID_COLOR, (x * CELL_SIZE, HEADER_HEIGHT), (x * CELL_SIZE, HEADER_HEIGHT + PLAY_ZONE_HEIGHT))
+            pygame.draw.line(v_screen, grid_color, (board_offset_x + x * CELL_SIZE, board_offset_y), (board_offset_x + x * CELL_SIZE, board_offset_y + PLAY_ZONE_HEIGHT))
         for y in range(GRID_SIZE):
-            pygame.draw.line(self.virtual_screen, GRID_COLOR, (0, HEADER_HEIGHT + y * CELL_SIZE), (WINDOW_WIDTH, HEADER_HEIGHT + y * CELL_SIZE))
+            pygame.draw.line(v_screen, grid_color, (board_offset_x, board_offset_y + y * CELL_SIZE), (board_offset_x + PLAY_ZONE_HEIGHT, board_offset_y + y * CELL_SIZE))
 
         # Calculate interpolation factor
         if self.paused or self.is_game_over:
@@ -521,7 +632,7 @@ class SnakeGame:
             t = (pygame.time.get_ticks() - self.last_update_time) / update_interval
             t = max(0.0, min(1.0, t))
 
-        # Draw snake with interpolation (shifted down by HEADER_HEIGHT)
+        # Draw snake with interpolation
         for i, segment in enumerate(self.snake):
             curr_pos = segment
             prev_pos = self.prev_snake[i] if i < len(self.prev_snake) else curr_pos
@@ -539,160 +650,154 @@ class SnakeGame:
                 diff.y += GRID_SIZE
 
             draw_pos = prev_pos + diff * t
-            x = (draw_pos.x % GRID_SIZE) * CELL_SIZE
-            y = (draw_pos.y % GRID_SIZE) * CELL_SIZE + HEADER_HEIGHT
+            x = board_offset_x + (draw_pos.x % GRID_SIZE) * CELL_SIZE
+            y = board_offset_y + (draw_pos.y % GRID_SIZE) * CELL_SIZE
 
             if i == 0:
-                self.draw_snake_head(self.virtual_screen, x, y)
+                self.draw_snake_head(v_screen, x, y)
             else:
                 is_last = i == len(self.snake) - 1
                 factor = 1.0 - (i / len(self.snake)) * 0.4
-                self.draw_snake_body(self.virtual_screen, x, y, is_last, factor)
+                self.draw_snake_body(v_screen, x, y, is_last, factor)
 
-        # Draw normal apple (shifted down by HEADER_HEIGHT)
-        food_x = self.food.x * CELL_SIZE
-        food_y = self.food.y * CELL_SIZE + HEADER_HEIGHT
+        # Draw normal apple
+        food_x = board_offset_x + self.food.x * CELL_SIZE
+        food_y = board_offset_y + self.food.y * CELL_SIZE
         center_x = food_x + CELL_SIZE // 2
         center_y = food_y + CELL_SIZE // 2
 
-        pygame.draw.circle(
-            self.virtual_screen, RED, (center_x, center_y), CELL_SIZE // 2 - 2
-        )
-        pygame.draw.circle(
-            self.virtual_screen, (200, 0, 0),
-            (center_x, center_y), CELL_SIZE // 2 - 2, 2
-        )
+        pygame.draw.circle(v_screen, RED, (center_x, center_y), CELL_SIZE // 2 - 2)
+        pygame.draw.circle(v_screen, (200, 0, 0), (center_x, center_y), CELL_SIZE // 2 - 2, 2)
 
         # Draw stem
-        pygame.draw.line(
-            self.virtual_screen,
-            (100, 150, 50),
-            (center_x, center_y - CELL_SIZE // 2),
-            (center_x, center_y - CELL_SIZE // 2 - 3),
-            2,
-        )
+        pygame.draw.line(v_screen, (100, 150, 50), (center_x, center_y - CELL_SIZE // 2), (center_x, center_y - CELL_SIZE // 2 - 3), 2)
 
-        # Draw golden apple if active (shifted down by HEADER_HEIGHT)
+        # Draw golden apple if active
         if self.golden_food is not None:
-            g_food_x = self.golden_food.x * CELL_SIZE
-            g_food_y = self.golden_food.y * CELL_SIZE + HEADER_HEIGHT
+            g_food_x = board_offset_x + self.golden_food.x * CELL_SIZE
+            g_food_y = board_offset_y + self.golden_food.y * CELL_SIZE
             g_center_x = g_food_x + CELL_SIZE // 2
             g_center_y = g_food_y + CELL_SIZE // 2
 
-            # Golden apple blinking when expiring
             draw_golden = True
             if self.golden_food_timer < 20 and (self.golden_food_timer // 2) % 2 == 0:
                 draw_golden = False
 
             if draw_golden:
-                # Gold apple body
-                pygame.draw.circle(self.virtual_screen, (255, 215, 0), (g_center_x, g_center_y), CELL_SIZE // 2 - 2)
-                # Outer gold border
-                pygame.draw.circle(self.virtual_screen, (218, 165, 32), (g_center_x, g_center_y), CELL_SIZE // 2 - 2, 2)
-                # Shine point
-                pygame.draw.circle(self.virtual_screen, WHITE, (g_center_x - 3, g_center_y - 3), 2)
-                # Stem
-                pygame.draw.line(self.virtual_screen, (100, 150, 50), (g_center_x, g_center_y - CELL_SIZE // 2 + 1), (g_center_x + 2, g_center_y - CELL_SIZE // 2 - 2), 2)
-                # Leaf
-                pygame.draw.circle(self.virtual_screen, GREEN, (g_center_x + 3, g_center_y - CELL_SIZE // 2 - 1), 2)
+                pygame.draw.circle(v_screen, (255, 215, 0), (g_center_x, g_center_y), CELL_SIZE // 2 - 2)
+                pygame.draw.circle(v_screen, (218, 165, 32), (g_center_x, g_center_y), CELL_SIZE // 2 - 2, 2)
+                pygame.draw.circle(v_screen, WHITE, (g_center_x - 3, g_center_y - 3), 2)
+                pygame.draw.line(v_screen, (100, 150, 50), (g_center_x, g_center_y - CELL_SIZE // 2 + 1), (g_center_x + 2, g_center_y - CELL_SIZE // 2 - 2), 2)
+                pygame.draw.circle(v_screen, GREEN, (g_center_x + 3, g_center_y - CELL_SIZE // 2 - 1), 2)
 
         # Draw play zone boundary border
-        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, (0, HEADER_HEIGHT, WINDOW_WIDTH, PLAY_ZONE_HEIGHT), 1)
+        pygame.draw.rect(v_screen, border_c, (board_offset_x, board_offset_y, PLAY_ZONE_HEIGHT, PLAY_ZONE_HEIGHT), 1)
 
-        # 2. Draw Top Header Bar Text
+        # Draw active particles
+        for p in self.particles:
+            rad = max(1, int(p["life"] / 6))
+            pygame.draw.circle(v_screen, p["color"], (int(p["x"]), int(p["y"])), rad)
+
+        # 3. Draw Top Header Bar Text
         score_text = self.font.render(f"Score: {self.score}", True, TEXT_LIGHT)
-        self.virtual_screen.blit(score_text, (15, 12))
+        v_screen.blit(score_text, (board_offset_x + 15, 12))
 
-        highscore_text = self.font.render(f"High: {self.high_score}", True, GOLD)
-        self.virtual_screen.blit(highscore_text, (WINDOW_WIDTH - highscore_text.get_width() - 15, 12))
+        highscore_text = self.font.render(f"High: {self.high_score}", True, theme_gold)
+        v_screen.blit(highscore_text, (board_offset_x + PLAY_ZONE_HEIGHT - highscore_text.get_width() - 15, 12))
 
         speed_text = self.small_font.render(f"Speed: {self.current_fps} FPS", True, TEXT_LIGHT)
-        self.virtual_screen.blit(speed_text, (WINDOW_WIDTH // 2 - speed_text.get_width() // 2, 20))
+        v_screen.blit(speed_text, (v_width // 2 - speed_text.get_width() // 2, 20))
 
-        # 3. Draw Bottom Controller Area
-        controller_y = HEADER_HEIGHT + PLAY_ZONE_HEIGHT
-        pygame.draw.rect(self.virtual_screen, BAR_BG, (0, controller_y, WINDOW_WIDTH, CONTROLLER_HEIGHT))
-        pygame.draw.line(self.virtual_screen, BORDER_COLOR, (0, controller_y), (WINDOW_WIDTH, controller_y), 1)
+        # 4. Draw D-PAD / Controller buttons
+        if self.show_dpad:
+            if is_landscape:
+                cx = 60
+                cy = 245
+                px = 580
+                py = cy
+                
+                # Side plates background
+                pygame.draw.rect(v_screen, BAR_BG, (0, 0, 120, v_height))
+                pygame.draw.rect(v_screen, BAR_BG, (520, 0, 120, v_height))
+                pygame.draw.line(v_screen, BORDER_COLOR, (120, 0), (120, v_height), 1)
+                pygame.draw.line(v_screen, BORDER_COLOR, (520, 0), (520, v_height), 1)
+            else:
+                controller_y = HEADER_HEIGHT + PLAY_ZONE_HEIGHT
+                cx = 120
+                cy = controller_y + CONTROLLER_HEIGHT // 2
+                px = 280
+                py = cy
+                
+                pygame.draw.rect(v_screen, BAR_BG, (0, controller_y, v_width, CONTROLLER_HEIGHT))
+                pygame.draw.line(v_screen, BORDER_COLOR, (0, controller_y), (v_width, controller_y), 1)
 
-        # Draw D-PAD
-        cx = 120
-        cy = controller_y + CONTROLLER_HEIGHT // 2  # 520
-        
-        # Determine colors (highlight active direction if not paused/gameover/nameinput)
-        up_color = GREEN if (self.direction == Direction.UP and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
-        down_color = GREEN if (self.direction == Direction.DOWN and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
-        left_color = GREEN if (self.direction == Direction.LEFT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
-        right_color = GREEN if (self.direction == Direction.RIGHT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
-        
-        # Draw background cross
-        pygame.draw.rect(self.virtual_screen, (30, 30, 30), (cx - 45, cy - 45, 90, 90), 0, 10)
-        pygame.draw.circle(self.virtual_screen, (40, 40, 40), (cx, cy), 15)
+            # Draw DPAD cross background
+            pygame.draw.rect(v_screen, (30, 30, 30), (cx - 45, cy - 45, 90, 90), 0, 10)
+            pygame.draw.circle(v_screen, (40, 40, 40), (cx, cy), 15)
 
-        # Draw button shapes (rounded corners)
-        pygame.draw.rect(self.virtual_screen, up_color, (cx - 20, cy - 45, 40, 25), 0, 4)
-        pygame.draw.rect(self.virtual_screen, down_color, (cx - 20, cy + 20, 40, 25), 0, 4)
-        pygame.draw.rect(self.virtual_screen, left_color, (cx - 45, cy - 20, 25, 40), 0, 4)
-        pygame.draw.rect(self.virtual_screen, right_color, (cx + 20, cy - 20, 25, 40), 0, 4)
-        
-        # Draw button borders
-        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, (cx - 20, cy - 45, 40, 25), 1, 4)
-        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, (cx - 20, cy + 20, 40, 25), 1, 4)
-        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, (cx - 45, cy - 20, 25, 40), 1, 4)
-        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, (cx + 20, cy - 20, 25, 40), 1, 4)
+            # DPAD Button colors
+            up_color = GREEN if (self.direction == Direction.UP and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+            down_color = GREEN if (self.direction == Direction.DOWN and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+            left_color = GREEN if (self.direction == Direction.LEFT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+            right_color = GREEN if (self.direction == Direction.RIGHT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
 
-        # Draw arrow indicators (polygons/triangles)
-        # Up
-        pygame.draw.polygon(self.virtual_screen, TEXT_LIGHT, [(cx, cy - 40), (cx - 8, cy - 26), (cx + 8, cy - 26)])
-        # Down
-        pygame.draw.polygon(self.virtual_screen, TEXT_LIGHT, [(cx, cy + 40), (cx - 8, cy + 26), (cx + 8, cy + 26)])
-        # Left
-        pygame.draw.polygon(self.virtual_screen, TEXT_LIGHT, [(cx - 40, cy), (cx - 26, cy - 8), (cx - 26, cy + 8)])
-        # Right
-        pygame.draw.polygon(self.virtual_screen, TEXT_LIGHT, [(cx + 40, cy), (cx + 26, cy - 8), (cx + 26, cy + 8)])
+            # Button blocks
+            pygame.draw.rect(v_screen, up_color, (cx - 20, cy - 45, 40, 25), 0, 4)
+            pygame.draw.rect(v_screen, down_color, (cx - 20, cy + 20, 40, 25), 0, 4)
+            pygame.draw.rect(v_screen, left_color, (cx - 45, cy - 20, 25, 40), 0, 4)
+            pygame.draw.rect(v_screen, right_color, (cx + 20, cy - 20, 25, 40), 0, 4)
 
-        # Draw Action/Pause button
-        px = 280
-        py = cy
-        pause_button_rect = pygame.Rect(px - 35, py - 20, 70, 40)
-        
-        # Decide color and label for Pause/Action button
-        if self.inputting_name:
-            action_color = GOLD
-            action_label = "OK"
-        elif self.is_game_over:
-            action_color = GREEN
-            action_label = "PLAY"
-        elif self.paused:
-            action_color = GREEN
-            action_label = "RESUME"
-        else:
-            action_color = RED
-            action_label = "PAUSE"
-            
-        pygame.draw.rect(self.virtual_screen, action_color, pause_button_rect, 0, 8)
-        pygame.draw.rect(self.virtual_screen, TEXT_LIGHT, pause_button_rect, 2, 8)
-        
-        action_text_surf = self.small_font.render(action_label, True, BLACK if action_color in (GOLD, GREEN) else TEXT_LIGHT)
-        self.virtual_screen.blit(action_text_surf, (px - action_text_surf.get_width() // 2, py - action_text_surf.get_height() // 2))
+            # Borders
+            pygame.draw.rect(v_screen, border_c, (cx - 20, cy - 45, 40, 25), 1, 4)
+            pygame.draw.rect(v_screen, border_c, (cx - 20, cy + 20, 40, 25), 1, 4)
+            pygame.draw.rect(v_screen, border_c, (cx - 45, cy - 20, 25, 40), 1, 4)
+            pygame.draw.rect(v_screen, border_c, (cx + 20, cy - 20, 25, 40), 1, 4)
 
-        # 4. Draw Bottom Footer Bar Text
+            # Indicators
+            pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx, cy - 40), (cx - 8, cy - 26), (cx + 8, cy - 26)])
+            pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx, cy + 40), (cx - 8, cy + 26), (cx + 8, cy + 26)])
+            pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx - 40, cy), (cx - 26, cy - 8), (cx - 26, cy + 8)])
+            pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx + 40, cy), (cx + 26, cy - 8), (cx + 26, cy + 8)])
+
+            # Action Button
+            pause_button_rect = pygame.Rect(px - 35, py - 20, 70, 40)
+            if self.inputting_name:
+                action_color = theme_gold
+                action_label = "OK"
+            elif self.is_game_over:
+                action_color = GREEN
+                action_label = "PLAY"
+            elif self.paused:
+                action_color = GREEN
+                action_label = "RESUME"
+            else:
+                action_color = RED
+                action_label = "PAUSE"
+
+            pygame.draw.rect(v_screen, action_color, pause_button_rect, 0, 8)
+            pygame.draw.rect(v_screen, TEXT_LIGHT, pause_button_rect, 2, 8)
+
+            action_text_surf = self.small_font.render(action_label, True, BLACK if action_color in (GOLD, GREEN) else TEXT_LIGHT)
+            v_screen.blit(action_text_surf, (px - action_text_surf.get_width() // 2, py - action_text_surf.get_height() // 2))
+
+        # 5. Draw Footer bar instructions
         instructions = self.footer_font.render(
             "Swipe/D-Pad/Keys: Move | Pause/Tap Screen to Control",
             True,
             TEXT_LIGHT,
         )
-        self.virtual_screen.blit(
-            instructions, (WINDOW_WIDTH // 2 - instructions.get_width() // 2, controller_y + CONTROLLER_HEIGHT + 7)
-        )
+        v_screen.blit(instructions, (v_width // 2 - instructions.get_width() // 2, v_height - FOOTER_HEIGHT + 7))
 
-        # 5. Draw Dialogue Card Overlays (Centered over Play Zone)
-        
+        # 6. Draw Dialogue Card Overlays (Centered over Play Zone)
+        cx_card = board_offset_x + PLAY_ZONE_HEIGHT // 2 - 150
+        cy_card = board_offset_y + PLAY_ZONE_HEIGHT // 2 - 140
+
         # Draw Pause Card
         if self.paused:
             card_width = 260
             card_height = 100
-            cx_card = WINDOW_WIDTH // 2 - card_width // 2
-            cy_card = HEADER_HEIGHT + PLAY_ZONE_HEIGHT // 2 - card_height // 2
+            cx_card = board_offset_x + PLAY_ZONE_HEIGHT // 2 - card_width // 2
+            cy_card = board_offset_y + PLAY_ZONE_HEIGHT // 2 - card_height // 2
 
             card_surface = pygame.Surface((card_width, card_height))
             card_surface.fill((15, 15, 15))
@@ -704,14 +809,14 @@ class SnakeGame:
             card_surface.blit(pause_text, (card_width // 2 - pause_text.get_width() // 2, 20))
             card_surface.blit(resume_text, (card_width // 2 - resume_text.get_width() // 2, 55))
 
-            self.virtual_screen.blit(card_surface, (cx_card, cy_card))
+            v_screen.blit(card_surface, (cx_card, cy_card))
 
         # Draw Name Input Card
         elif self.inputting_name:
             card_width = 280
             card_height = 180
-            cx_card = WINDOW_WIDTH // 2 - card_width // 2
-            cy_card = HEADER_HEIGHT + PLAY_ZONE_HEIGHT // 2 - card_height // 2
+            cx_card = board_offset_x + PLAY_ZONE_HEIGHT // 2 - card_width // 2
+            cy_card = board_offset_y + PLAY_ZONE_HEIGHT // 2 - card_height // 2
 
             card_surface = pygame.Surface((card_width, card_height))
             card_surface.fill((15, 15, 15))
@@ -720,18 +825,14 @@ class SnakeGame:
             title_text = self.font.render("NEW HIGH SCORE!", True, GOLD)
             prompt_text = self.small_font.render("D-Pad Up/Down to cycle, L/R to move:", True, TEXT_LIGHT)
             
-            # Render individual characters with active indicator
             for idx in range(3):
                 char = self.input_name[idx] if idx < len(self.input_name) else "_"
                 char_color = GOLD if idx == self.name_input_index else GREEN
                 char_surf = self.font.render(char, True, char_color)
-                # Position them: centered around card_width // 2
-                # Spacing of 30 pixels: index 0 at -30, index 1 at 0, index 2 at +30
                 pos_x = card_width // 2 - char_surf.get_width() // 2 + (idx - 1) * 30
                 pos_y = 90
                 card_surface.blit(char_surf, (pos_x, pos_y))
                 
-                # Draw underline for active character
                 if idx == self.name_input_index:
                     pygame.draw.line(card_surface, GOLD, (pos_x, pos_y + char_surf.get_height() + 2), (pos_x + char_surf.get_width(), pos_y + char_surf.get_height() + 2), 2)
                     
@@ -741,14 +842,14 @@ class SnakeGame:
             card_surface.blit(prompt_text, (card_width // 2 - prompt_text.get_width() // 2, 50))
             card_surface.blit(submit_text, (card_width // 2 - submit_text.get_width() // 2, 140))
 
-            self.virtual_screen.blit(card_surface, (cx_card, cy_card))
+            v_screen.blit(card_surface, (cx_card, cy_card))
 
         # Draw Game Over Card
         elif self.is_game_over:
             card_width = 300
             card_height = 280
-            cx_card = WINDOW_WIDTH // 2 - card_width // 2
-            cy_card = HEADER_HEIGHT + PLAY_ZONE_HEIGHT // 2 - card_height // 2
+            cx_card = board_offset_x + PLAY_ZONE_HEIGHT // 2 - card_width // 2
+            cy_card = board_offset_y + PLAY_ZONE_HEIGHT // 2 - card_height // 2
 
             card_surface = pygame.Surface((card_width, card_height))
             card_surface.fill((15, 15, 15))
@@ -776,21 +877,32 @@ class SnakeGame:
             restart_text = self.small_font.render("Tap screen or Press ENTER to play", True, TEXT_LIGHT)
             card_surface.blit(restart_text, (card_width // 2 - restart_text.get_width() // 2, 230))
 
-            self.virtual_screen.blit(card_surface, (cx_card, cy_card))
+            v_screen.blit(card_surface, (cx_card, cy_card))
 
-        # 5. Aspect-ratio aware scaling to actual window size
+        # 7. Aspect-ratio aware high-quality scaling to actual window size
         screen_w, screen_h = self.screen.get_size()
-        scale = min(screen_w / WINDOW_WIDTH, screen_h / WINDOW_HEIGHT)
-        new_w = int(WINDOW_WIDTH * scale)
-        new_h = int(WINDOW_HEIGHT * scale)
+        scale = min(screen_w / v_width, screen_h / v_height)
+        new_w = int(v_width * scale)
+        new_h = int(v_height * scale)
         
         offset_x = (screen_w - new_w) // 2
         offset_y = (screen_h - new_h) // 2
         
-        scaled_surface = pygame.transform.scale(self.virtual_screen, (new_w, new_h))
+        try:
+            scaled_surface = pygame.transform.smoothscale(v_screen, (new_w, new_h))
+        except Exception:
+            scaled_surface = pygame.transform.scale(v_screen, (new_w, new_h))
         
+        # Apply screen shake offset if active
+        shake_x = 0
+        shake_y = 0
+        if self.screen_shake > 0:
+            shake_x = random.randint(-self.screen_shake, self.screen_shake)
+            shake_y = random.randint(-self.screen_shake, self.screen_shake)
+            self.screen_shake -= 1
+
         self.screen.fill(BLACK)
-        self.screen.blit(scaled_surface, (offset_x, offset_y))
+        self.screen.blit(scaled_surface, (offset_x + shake_x, offset_y + shake_y))
         pygame.display.flip()
 
     async def run(self):
