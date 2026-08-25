@@ -21,6 +21,16 @@ WINDOW_HEIGHT = PLAY_ZONE_HEIGHT + HEADER_HEIGHT + CONTROLLER_HEIGHT + FOOTER_HE
 INITIAL_FPS = 5
 MAX_FPS = 15
 
+# Game modes / level settings
+LEVEL_SETTINGS = {
+    1: {"name": "LEVEL 1 - EASY", "fps": 5, "obstacles": 2},
+    2: {"name": "LEVEL 2 - NORMAL", "fps": 6, "obstacles": 4},
+    3: {"name": "LEVEL 3 - HARD", "fps": 7, "obstacles": 6},
+    4: {"name": "LEVEL 4 - VERY HARD", "fps": 8, "obstacles": 9},
+    5: {"name": "LEVEL 5 - EXTREME", "fps": 10, "obstacles": 12},
+}
+
+
 # Colors
 WHITE = (255, 255, 255)
 GREEN = (0, 128, 0)
@@ -48,8 +58,36 @@ class Direction(Enum):
 
 
 class SnakeGame:
+    def _get_device_pixel_ratio(self):
+        """Phones report devicePixelRatio 2-3 (retina); desktop is usually 1.
+        Rendering the canvas buffer at only the CSS logical size means the
+        browser has to stretch it over 2-3x more physical pixels on phones,
+        which is why the game looks sharp on PC but blurry on mobile."""
+        try:
+            import platform
+            return platform.window.devicePixelRatio or 1
+        except Exception:
+            return 1
+
+    def _apply_canvas_css_size(self, css_w, css_h):
+        """Keep the canvas's on-page (CSS) size unchanged while its backing
+        pixel buffer is rendered at native device resolution, so it stays
+        crisp on high-DPI phone screens instead of being upscaled by CSS."""
+        try:
+            import platform
+            canvas = platform.document.getElementById("canvas")
+            canvas.style.width = f"{css_w}px"
+            canvas.style.height = f"{css_h}px"
+        except Exception:
+            pass
+
     def __init__(self):
-        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
+        self.dpr = self._get_device_pixel_ratio()
+        self.screen = pygame.display.set_mode(
+            (int(WINDOW_WIDTH * self.dpr), int(WINDOW_HEIGHT * self.dpr)),
+            pygame.RESIZABLE,
+        )
+        self._apply_canvas_css_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         self.virtual_screen = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT))
         pygame.display.set_caption("Snake Game - Realistic Snake")
         self.clock = pygame.time.Clock()
@@ -71,6 +109,14 @@ class SnakeGame:
         self.inputting_name = False
         self.input_name = ""
 
+        # Mode / level selection. Free Mode is the main high-score mode.
+        self.screen_mode = "menu"
+        self.selected_menu = 0
+        self.game_mode = "free"
+        self.level = 1
+        self.obstacles = []
+        self.personal_high_score = 0
+
         # Golden Apple state
         self.golden_food = None
         self.golden_food_timer = 0
@@ -84,6 +130,14 @@ class SnakeGame:
         self.particles = []
         self.screen_shake = 0
 
+        # Control scheme: "dpad" or "joystick" (mobile only, user-selectable)
+        self.control_mode = self.load_control_mode()
+        self.joystick_active = False
+        self.joystick_offset = pygame.math.Vector2(0, 0)
+        self.joystick_last_dir = None
+        self.joystick_radius = 45      # touch hit-area for the base
+        self.joystick_max_drag = 38    # how far the knob can visually travel
+
         # Movement and rendering states
         self.input_queue = []
         self.prev_snake = list(self.snake)
@@ -92,8 +146,20 @@ class SnakeGame:
         self.spawn_food()
         self.running = True
 
+    def _browser_storage(self):
+        """Return the browser's window.localStorage object if running under
+        Pygbag/Emscripten in a browser tab, otherwise None. Pygbag's virtual
+        filesystem does NOT persist across page reloads, so a plain
+        highscore.json write only survives for the current tab session.
+        localStorage is what actually survives refreshes/revisits."""
+        try:
+            import platform
+            return platform.window.localStorage
+        except Exception:
+            return None
+
     def load_leaderboard(self):
-        """Load leaderboard from JSON file."""
+        """Load leaderboard and personal best from browser storage or JSON."""
         default_leaderboard = [
             {"name": "BOT", "score": 40},
             {"name": "VIP", "score": 30},
@@ -101,32 +167,80 @@ class SnakeGame:
             {"name": "NEW", "score": 10},
             {"name": "BEG", "score": 5}
         ]
+
+        storage = self._browser_storage()
+        if storage is not None:
+            try:
+                raw = storage.getItem("snake_leaderboard")
+                if raw:
+                    data = json.loads(raw)
+                    if "leaderboard" in data:
+                        self.personal_high_score = int(data.get("personal_high_score", 0))
+                        return data["leaderboard"]
+            except Exception as e:
+                print(f"Error loading leaderboard from localStorage: {e}")
+            return default_leaderboard
+
         if os.path.exists(self.highscore_file):
             try:
                 with open(self.highscore_file, "r") as f:
                     data = json.load(f)
                     if "leaderboard" in data:
+                        self.personal_high_score = int(data.get("personal_high_score", 0))
                         return data["leaderboard"]
                     elif "high_score" in data:
-                        # Convert old format
                         high_score = data["high_score"]
                         default_leaderboard[0] = {"name": "AAA", "score": high_score}
                         default_leaderboard.sort(key=lambda x: x["score"], reverse=True)
+                        self.personal_high_score = high_score
                         return default_leaderboard
             except Exception as e:
                 print(f"Error loading leaderboard: {e}")
         return default_leaderboard
 
     def save_leaderboard(self):
-        """Save leaderboard to JSON file."""
+        """Save leaderboard - to browser localStorage on web (survives
+        reloads), to a JSON file when running natively on desktop Python."""
+        payload = json.dumps({"leaderboard": self.leaderboard, "personal_high_score": self.personal_high_score})
+
+        storage = self._browser_storage()
+        if storage is not None:
+            try:
+                storage.setItem("snake_leaderboard", payload)
+                if self.leaderboard:
+                    self.high_score = self.leaderboard[0]["score"]
+            except Exception as e:
+                print(f"Error saving leaderboard to localStorage: {e}")
+            return
+
         try:
             with open(self.highscore_file, "w") as f:
-                json.dump({"leaderboard": self.leaderboard}, f)
-            # Update high score cache
+                f.write(payload)
             if self.leaderboard:
                 self.high_score = self.leaderboard[0]["score"]
         except Exception as e:
             print(f"Error saving leaderboard: {e}")
+
+    def load_control_mode(self):
+        """Load the user's saved control preference (dpad/joystick)."""
+        storage = self._browser_storage()
+        if storage is not None:
+            try:
+                saved = storage.getItem("snake_control_mode")
+                if saved in ("dpad", "joystick"):
+                    return saved
+            except Exception:
+                pass
+        return "dpad"
+
+    def save_control_mode(self):
+        """Persist the user's control preference."""
+        storage = self._browser_storage()
+        if storage is not None:
+            try:
+                storage.setItem("snake_control_mode", self.control_mode)
+            except Exception:
+                pass
 
     def spawn_food(self):
         """Spawn food at a random location not occupied by snake."""
@@ -161,6 +275,43 @@ class SnakeGame:
             # Running natively on desktop Python
             return "Desktop"
 
+    def screen_to_virtual(self, pos):
+        """Convert a real screen (x, y) mouse/touch position into the
+        game's virtual (unscaled) coordinate space, matching the scaling
+        used in draw()."""
+        screen_w, screen_h = self.screen.get_size()
+        is_landscape = self.show_dpad and (screen_w > screen_h)
+        if is_landscape:
+            v_width, v_height = 640, 490
+        else:
+            v_width = 400
+            v_height = 610 if self.show_dpad else 490
+        scale = min(screen_w / v_width, screen_h / v_height)
+        offset_x = (screen_w - v_width * scale) // 2
+        offset_y = (screen_h - v_height * scale) // 2
+        vx = (pos[0] - offset_x) / scale
+        vy = (pos[1] - offset_y) / scale
+        return vx, vy
+
+    def get_controller_layout(self):
+        """Return (cx, cy, px, py, toggle_rect) for the current orientation:
+        cx/cy = center of the D-pad / joystick, px/py = center of the
+        action (pause/play) button, toggle_rect = the small button that
+        switches between D-pad and joystick control modes."""
+        screen_w, screen_h = self.screen.get_size()
+        is_landscape = self.show_dpad and (screen_w > screen_h)
+        if is_landscape:
+            cx, cy = 60, 245
+            px, py = 580, 245
+            toggle_rect = pygame.Rect(525, 5, 110, 24)
+        else:
+            controller_y = HEADER_HEIGHT + PLAY_ZONE_HEIGHT
+            cx = 120
+            cy = controller_y + CONTROLLER_HEIGHT // 2
+            px, py = 280, cy
+            toggle_rect = pygame.Rect(400 - 70, controller_y + 5, 60, 24)
+        return cx, cy, px, py, toggle_rect
+
     def get_board_offsets(self):
         screen_w, screen_h = self.screen.get_size()
         is_landscape = self.show_dpad and (screen_w > screen_h)
@@ -182,35 +333,38 @@ class SnakeGame:
                 "life": random.randint(10, 25)
             })
 
+    def effective_control_mode(self):
+        """During name entry we always want precise, discrete D-pad input
+        (cycling letters), even if the player picked joystick mode."""
+        return "dpad" if self.inputting_name else self.control_mode
+
     def get_clicked_button(self, vx, vy):
-        screen_w, screen_h = self.screen.get_size()
-        is_landscape = self.show_dpad and (screen_w > screen_h)
-        
-        if is_landscape:
-            cx = 60
-            cy = 245
-            px = 580
-            py = 245
-        else:
-            cx = 120
-            cy = HEADER_HEIGHT + PLAY_ZONE_HEIGHT + CONTROLLER_HEIGHT // 2  # 520
-            px = 280
-            py = cy
-        
-        # Check DPAD buttons
-        if pygame.Rect(cx - 20, cy - 45, 40, 25).collidepoint(vx, vy):
-            return "UP"
-        if pygame.Rect(cx - 20, cy + 20, 40, 25).collidepoint(vx, vy):
-            return "DOWN"
-        if pygame.Rect(cx - 45, cy - 20, 25, 40).collidepoint(vx, vy):
-            return "LEFT"
-        if pygame.Rect(cx + 20, cy - 20, 25, 40).collidepoint(vx, vy):
-            return "RIGHT"
-            
-        # Check Pause button
+        cx, cy, px, py, toggle_rect = self.get_controller_layout()
+
+        # Toggle button switches control mode (not available while entering
+        # a name, since that always uses the D-pad for precision)
+        if not self.inputting_name and toggle_rect.collidepoint(vx, vy):
+            return "TOGGLE"
+
+        # Check Pause / action button
         if pygame.Rect(px - 35, py - 20, 70, 40).collidepoint(vx, vy):
             return "PAUSE"
-            
+
+        if self.effective_control_mode() == "dpad":
+            # Check DPAD buttons
+            if pygame.Rect(cx - 20, cy - 45, 40, 25).collidepoint(vx, vy):
+                return "UP"
+            if pygame.Rect(cx - 20, cy + 20, 40, 25).collidepoint(vx, vy):
+                return "DOWN"
+            if pygame.Rect(cx - 45, cy - 20, 25, 40).collidepoint(vx, vy):
+                return "LEFT"
+            if pygame.Rect(cx + 20, cy - 20, 25, 40).collidepoint(vx, vy):
+                return "RIGHT"
+        else:
+            # Joystick mode: a press inside the base starts a drag
+            if math.hypot(vx - cx, vy - cy) <= self.joystick_radius:
+                return "JOYSTICK_DOWN"
+
         return None
 
     def change_input_letter(self, amount):
@@ -228,11 +382,79 @@ class SnakeGame:
 
     def submit_name(self):
         if len(self.input_name) == 3:
+            # Only Free Mode scores compete for the global leaderboard.
+            # The score is already known to qualify before this screen appears.
             self.leaderboard.append({"name": self.input_name, "score": self.score})
             self.leaderboard.sort(key=lambda x: x["score"], reverse=True)
             self.leaderboard = self.leaderboard[:5]
             self.save_leaderboard()
             self.inputting_name = False
+            self.screen_mode = "gameover"
+
+    def spawn_obstacles(self):
+        """Create level-specific obstacles in safe, unoccupied cells."""
+        self.obstacles = []
+        count = 0 if self.game_mode == "free" else LEVEL_SETTINGS[self.level]["obstacles"]
+        attempts = 0
+        while len(self.obstacles) < count and attempts < 1000:
+            attempts += 1
+            pos = pygame.math.Vector2(random.randint(0, GRID_SIZE - 1), random.randint(0, GRID_SIZE - 1))
+            if pos not in self.snake and pos != self.food and pos != self.golden_food and pos not in self.obstacles:
+                # Keep the starting area reasonably clear.
+                if abs(pos.x - 5) + abs(pos.y - 5) > 5:
+                    self.obstacles.append(pos)
+
+    def spawn_worm_apple(self):
+        """Spawn the red apple with a worm at an empty location."""
+        while True:
+            x = random.randint(0, GRID_SIZE - 1)
+            y = random.randint(0, GRID_SIZE - 1)
+            pos = pygame.math.Vector2(x, y)
+            if pos not in self.snake and pos != self.food and pos != self.golden_food and pos not in self.obstacles:
+                self.worm_food = pos
+                return
+
+    def start_game(self, mode="free", level=1):
+        self.game_mode = mode
+        self.level = level
+        self.screen_mode = "playing"
+        self.snake = [pygame.math.Vector2(5, 5)]
+        self.prev_snake = list(self.snake)
+        self.direction = Direction.RIGHT
+        self.input_queue.clear()
+        self.score = 0
+        self.current_fps = INITIAL_FPS if mode == "free" else LEVEL_SETTINGS[level]["fps"]
+        self.spawn_food()
+        self.golden_food = None
+        self.golden_food_timer = 0
+        self.worm_food = None
+        self.obstacles = []
+        self.spawn_obstacles()
+        # Special worm apple appears occasionally during play.
+        self.is_game_over = False
+        self.paused = False
+        self.inputting_name = False
+        self.last_update_time = pygame.time.get_ticks()
+
+    def handle_menu_click(self, vx, vy):
+        """Handle menu and level-selection buttons."""
+        if self.screen_mode == "menu":
+            if pygame.Rect(80, 190, 240, 60).collidepoint(vx, vy):
+                self.start_game("free")
+            elif pygame.Rect(80, 270, 240, 60).collidepoint(vx, vy):
+                self.screen_mode = "levels"
+            elif pygame.Rect(80, 350, 240, 60).collidepoint(vx, vy):
+                self.screen_mode = "leaderboard"
+        elif self.screen_mode == "levels":
+            for i in range(5):
+                if pygame.Rect(55, 90 + i * 70, 290, 55).collidepoint(vx, vy):
+                    self.start_game("level", i + 1)
+                    return
+            if pygame.Rect(10, 10, 100, 40).collidepoint(vx, vy):
+                self.screen_mode = "menu"
+        elif self.screen_mode == "leaderboard":
+            if pygame.Rect(10, 10, 100, 40).collidepoint(vx, vy):
+                self.screen_mode = "menu"
 
     def handle_direction_change(self, new_dir):
         if self.paused or self.is_game_over or self.inputting_name:
@@ -253,36 +475,39 @@ class SnakeGame:
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.VIDEORESIZE:
-                self.screen = pygame.display.set_mode((event.w, event.h), pygame.RESIZABLE)
+                self.dpr = self._get_device_pixel_ratio()
+                self.screen = pygame.display.set_mode(
+                    (int(event.w * self.dpr), int(event.h * self.dpr)),
+                    pygame.RESIZABLE,
+                )
+                self._apply_canvas_css_size(event.w, event.h)
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 self.swipe_start_pos = event.pos
                 self.show_dpad = (self.device_type == "Mobile")
-                
-                # Check for click on virtual buttons
-                screen_w, screen_h = self.screen.get_size()
-                is_landscape = self.show_dpad and (screen_w > screen_h)
-                
-                if is_landscape:
-                    v_width = 640
-                    v_height = 490
-                else:
-                    v_width = 400
-                    v_height = 610 if self.show_dpad else 490
-                
-                scale = min(screen_w / v_width, screen_h / v_height)
-                offset_x = (screen_w - v_width * scale) // 2
-                offset_y = (screen_h - v_height * scale) // 2
-                
-                vx = (event.pos[0] - offset_x) / scale
-                vy = (event.pos[1] - offset_y) / scale
-                
+
+                vx, vy = self.screen_to_virtual(event.pos)
+
+                if self.screen_mode in ("menu", "levels", "leaderboard"):
+                    self.handle_menu_click(vx, vy)
+                    return
+
                 if self.is_game_over:
                     self.reset_game()
                     return
-                    
+
                 button = self.get_clicked_button(vx, vy) if self.show_dpad else None
                 if button:
-                    if self.inputting_name:
+                    # A button/joystick press handled the touch — don't also
+                    # interpret the eventual release as a swipe.
+                    self.swipe_start_pos = None
+
+                    if button == "TOGGLE":
+                        self.control_mode = "joystick" if self.control_mode == "dpad" else "dpad"
+                        self.save_control_mode()
+                        self.joystick_active = False
+                        self.joystick_offset = pygame.math.Vector2(0, 0)
+                        self.joystick_last_dir = None
+                    elif self.inputting_name:
                         if button == "UP":
                             self.change_input_letter(1)
                         elif button == "DOWN":
@@ -307,7 +532,39 @@ class SnakeGame:
                                 self.handle_direction_change(Direction.LEFT)
                             elif button == "RIGHT":
                                 self.handle_direction_change(Direction.RIGHT)
+                            elif button == "JOYSTICK_DOWN":
+                                self.joystick_active = True
+                                self.joystick_offset = pygame.math.Vector2(0, 0)
+                                self.joystick_last_dir = None
+            elif event.type == pygame.MOUSEMOTION:
+                if self.joystick_active and self.effective_control_mode() == "joystick" \
+                        and not self.paused and not self.is_game_over and not self.inputting_name:
+                    vx, vy = self.screen_to_virtual(event.pos)
+                    cx, cy, _, _, _ = self.get_controller_layout()
+                    raw = pygame.math.Vector2(vx - cx, vy - cy)
+                    dist = raw.length()
+
+                    # Visual knob offset, clamped so it never leaves the base
+                    if dist > self.joystick_max_drag and dist > 0:
+                        self.joystick_offset = raw * (self.joystick_max_drag / dist)
+                    else:
+                        self.joystick_offset = raw
+
+                    # Small dead-zone so tiny jitters don't register as moves
+                    if dist > 12:
+                        if abs(raw.x) > abs(raw.y):
+                            new_dir = Direction.RIGHT if raw.x > 0 else Direction.LEFT
+                        else:
+                            new_dir = Direction.DOWN if raw.y > 0 else Direction.UP
+                        if new_dir != self.joystick_last_dir:
+                            self.handle_direction_change(new_dir)
+                            self.joystick_last_dir = new_dir
             elif event.type == pygame.MOUSEBUTTONUP:
+                if self.joystick_active:
+                    self.joystick_active = False
+                    self.joystick_offset = pygame.math.Vector2(0, 0)
+                    self.joystick_last_dir = None
+
                 if self.swipe_start_pos and self.device_type == "Mobile":
                     end_pos = event.pos
                     dx = end_pos[0] - self.swipe_start_pos[0]
@@ -330,6 +587,30 @@ class SnakeGame:
                     pygame.display.toggle_fullscreen()
                     return
  
+                if self.screen_mode in ("menu", "levels", "leaderboard"):
+                    if event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE):
+                        self.screen_mode = "menu"
+                    elif self.screen_mode == "menu":
+                        if event.key in (pygame.K_UP, pygame.K_w):
+                            self.selected_menu = (self.selected_menu - 1) % 3
+                        elif event.key in (pygame.K_DOWN, pygame.K_s):
+                            self.selected_menu = (self.selected_menu + 1) % 3
+                        elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                            if self.selected_menu == 0:
+                                self.start_game("free")
+                            elif self.selected_menu == 1:
+                                self.screen_mode = "levels"
+                            else:
+                                self.screen_mode = "leaderboard"
+                    elif self.screen_mode == "levels":
+                        if event.key in (pygame.K_UP, pygame.K_w):
+                            self.level = 1 if self.level >= 5 else self.level + 1
+                        elif event.key in (pygame.K_DOWN, pygame.K_s):
+                            self.level = 5 if self.level <= 1 else self.level - 1
+                        elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                            self.start_game("level", self.level)
+                    return
+
                 if self.inputting_name:
                     if event.key == pygame.K_BACKSPACE:
                         self.input_name = self.input_name[:-1]
@@ -415,11 +696,23 @@ class SnakeGame:
             or new_head.y >= GRID_SIZE
         ):
             wall_hit = True
-            self.score -= 1
+            self.score -= 10
 
-            # Wrap around to the other side
-            new_head.x = new_head.x % GRID_SIZE
-            new_head.y = new_head.y % GRID_SIZE
+            # Most of the time wrap normally; sometimes teleport to a random
+            # location on one of the four walls for an unpredictable exit.
+            if random.random() < 0.35:
+                edge = random.choice(("top", "bottom", "left", "right"))
+                if edge == "top":
+                    new_head = pygame.math.Vector2(random.randint(0, GRID_SIZE - 1), 0)
+                elif edge == "bottom":
+                    new_head = pygame.math.Vector2(random.randint(0, GRID_SIZE - 1), GRID_SIZE - 1)
+                elif edge == "left":
+                    new_head = pygame.math.Vector2(0, random.randint(0, GRID_SIZE - 1))
+                else:
+                    new_head = pygame.math.Vector2(GRID_SIZE - 1, random.randint(0, GRID_SIZE - 1))
+            else:
+                new_head.x = new_head.x % GRID_SIZE
+                new_head.y = new_head.y % GRID_SIZE
 
         # Check collision with itself
         if new_head in self.snake:
@@ -431,10 +724,32 @@ class SnakeGame:
             self.game_over()
             return
 
+        # Obstacles cost 20 points. Remove the hit obstacle and respawn it.
+        if new_head in self.obstacles:
+            self.score -= 20
+            self.screen_shake = 8
+            bx, by = self.get_board_offsets()
+            ox = bx + new_head.x * CELL_SIZE + CELL_SIZE // 2
+            oy = by + new_head.y * CELL_SIZE + CELL_SIZE // 2
+            self.spawn_particles(ox, oy, RED)
+            self.obstacles.remove(new_head)
+            self.spawn_obstacles()
+
         self.snake.insert(0, new_head)
 
-        # Check if snake ate food
-        if new_head == self.food:
+        # Check if snake ate the red worm apple first.
+        if self.worm_food is not None and new_head == self.worm_food:
+            self.score -= 30
+            # The worm apple makes the snake longer despite the score penalty.
+            self.snake.extend([self.snake[-1].copy(), self.snake[-1].copy()])
+            bx, by = self.get_board_offsets()
+            wx = bx + self.worm_food.x * CELL_SIZE + CELL_SIZE // 2
+            wy = by + self.worm_food.y * CELL_SIZE + CELL_SIZE // 2
+            self.spawn_particles(wx, wy, RED)
+            self.worm_food = None
+            self.spawn_worm_apple()
+        # Check if snake ate normal food
+        elif new_head == self.food:
             self.score += 10
             bx, by = self.get_board_offsets()
             fx = bx + self.food.x * CELL_SIZE + CELL_SIZE // 2
@@ -447,6 +762,8 @@ class SnakeGame:
             # Spawn golden apple with 15% chance
             if random.random() < 0.15 and self.golden_food is None:
                 self.spawn_golden_apple()
+            if random.random() < 0.12 and self.worm_food is None:
+                self.spawn_worm_apple()
         elif self.golden_food and new_head == self.golden_food:
             self.score += 30
             bx, by = self.get_board_offsets()
@@ -464,6 +781,11 @@ class SnakeGame:
                     self.snake.pop()
         else:
             self.snake.pop()
+
+        # Personal best is independent of the leaderboard.
+        if self.score > self.personal_high_score:
+            self.personal_high_score = self.score
+            self.save_leaderboard()
 
         if wall_hit:
             self.screen_shake = 5
@@ -484,28 +806,25 @@ class SnakeGame:
         """Handle game over."""
         print(f"Game Over! Final Score: {self.score}")
         print(f"Final Speed: {self.current_fps} FPS")
-        # Check if score qualifies for Top 5 leaderboard
-        if len(self.leaderboard) < 5 or self.score > self.leaderboard[-1]["score"]:
+        if self.score > self.personal_high_score:
+            self.personal_high_score = self.score
+            self.save_leaderboard()
+        # Only Free Mode can enter the shared leaderboard, and only when the
+        # score is higher than the current lowest qualifying score.
+        qualifies = (
+            self.game_mode == "free"
+            and (len(self.leaderboard) < 5 or self.score > self.leaderboard[-1]["score"])
+        )
+        if qualifies:
             self.inputting_name = True
             self.input_name = "AAA"
             self.name_input_index = 0
         self.is_game_over = True
+        self.screen_mode = "playing"
 
     def reset_game(self):
-        """Reset the game."""
-        self.snake = [pygame.math.Vector2(5, 5)]
-        self.prev_snake = list(self.snake)
-        self.direction = Direction.RIGHT
-        self.input_queue.clear()
-        self.score = 0
-        self.current_fps = INITIAL_FPS
-        self.spawn_food()
-        self.golden_food = None
-        self.golden_food_timer = 0
-        self.is_game_over = False
-        self.paused = False
-        self.inputting_name = False
-        self.last_update_time = pygame.time.get_ticks()
+        """Restart the current mode/level."""
+        self.start_game(self.game_mode, self.level)
 
     def draw_snake_head(self, g, x, y):
         """Draw the snake's head with eyes and tongue."""
@@ -582,8 +901,88 @@ class SnakeGame:
         if radius > 4:
             pygame.draw.circle(g, LIGHT_GREEN if not is_last else WHITE, (center_x - 1, center_y - 1), radius - 3, 1)
 
+    def _present_virtual(self, v_screen, v_width, v_height):
+        screen_w, screen_h = self.screen.get_size()
+        scale = min(screen_w / v_width, screen_h / v_height)
+        new_w, new_h = int(v_width * scale), int(v_height * scale)
+        scaled_surface = pygame.transform.smoothscale(v_screen, (new_w, new_h))
+        offset_x = (screen_w - new_w) // 2
+        offset_y = (screen_h - new_h) // 2
+        self.screen.fill(BLACK)
+        self.screen.blit(scaled_surface, (offset_x, offset_y))
+        pygame.display.flip()
+
+    def draw_menu(self):
+        self.virtual_screen.fill(DARK_BG)
+        title = self.font.render("SNAKE", True, GREEN)
+        self.virtual_screen.blit(title, (200 - title.get_width() // 2, 60))
+        subtitle = self.small_font.render("Choose a game mode", True, TEXT_LIGHT)
+        self.virtual_screen.blit(subtitle, (200 - subtitle.get_width() // 2, 110))
+        labels = ["FREE MODE", "LEVELS", "LEADERBOARD"]
+        for i, label in enumerate(labels):
+            rect = pygame.Rect(80, 190 + i * 80, 240, 60)
+            selected = i == self.selected_menu
+            pygame.draw.rect(self.virtual_screen, GREEN if selected else BAR_BG, rect, 0, 10)
+            pygame.draw.rect(self.virtual_screen, TEXT_LIGHT, rect, 2, 10)
+            text = self.font.render(label, True, BLACK if selected else TEXT_LIGHT)
+            self.virtual_screen.blit(text, (rect.centerx - text.get_width() // 2, rect.centery - text.get_height() // 2))
+        personal = self.small_font.render(f"Personal High Score: {self.personal_high_score}", True, GOLD)
+        self.virtual_screen.blit(personal, (200 - personal.get_width() // 2, 445))
+        hint = self.footer_font.render("Use UP/DOWN + ENTER, or tap a button", True, TEXT_LIGHT)
+        self.virtual_screen.blit(hint, (200 - hint.get_width() // 2, 475))
+
+    def draw_levels(self):
+        self.virtual_screen.fill(DARK_BG)
+        back = pygame.Rect(10, 10, 100, 40)
+        pygame.draw.rect(self.virtual_screen, BAR_BG, back, 0, 6)
+        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, back, 1, 6)
+        back_text = self.small_font.render("BACK", True, TEXT_LIGHT)
+        self.virtual_screen.blit(back_text, (back.centerx - back_text.get_width() // 2, back.centery - back_text.get_height() // 2))
+        title = self.font.render("CHOOSE LEVEL", True, GOLD)
+        self.virtual_screen.blit(title, (200 - title.get_width() // 2, 25))
+        for i in range(1, 6):
+            rect = pygame.Rect(55, 90 + (i - 1) * 70, 290, 55)
+            selected = i == self.level
+            pygame.draw.rect(self.virtual_screen, GREEN if selected else BAR_BG, rect, 0, 8)
+            pygame.draw.rect(self.virtual_screen, TEXT_LIGHT, rect, 2, 8)
+            text = self.small_font.render(LEVEL_SETTINGS[i]["name"], True, BLACK if selected else TEXT_LIGHT)
+            self.virtual_screen.blit(text, (rect.centerx - text.get_width() // 2, rect.centery - text.get_height() // 2))
+        hint = self.footer_font.render("Level 1 is easiest - Level 5 is hardest", True, TEXT_LIGHT)
+        self.virtual_screen.blit(hint, (200 - hint.get_width() // 2, 455))
+
+    def draw_leaderboard_screen(self):
+        self.virtual_screen.fill(DARK_BG)
+        back = pygame.Rect(10, 10, 100, 40)
+        pygame.draw.rect(self.virtual_screen, BAR_BG, back, 0, 6)
+        pygame.draw.rect(self.virtual_screen, BORDER_COLOR, back, 1, 6)
+        back_text = self.small_font.render("BACK", True, TEXT_LIGHT)
+        self.virtual_screen.blit(back_text, (back.centerx - back_text.get_width() // 2, back.centery - back_text.get_height() // 2))
+        title = self.font.render("TOP 5 LEADERBOARD", True, GOLD)
+        self.virtual_screen.blit(title, (200 - title.get_width() // 2, 70))
+        for index, entry in enumerate(self.leaderboard):
+            text = self.small_font.render(f"{index + 1}. {entry['name']}   {entry['score']}", True, TEXT_LIGHT)
+            self.virtual_screen.blit(text, (200 - text.get_width() // 2, 140 + index * 45))
+        personal = self.font.render(f"Personal Best: {self.personal_high_score}", True, GREEN)
+        self.virtual_screen.blit(personal, (200 - personal.get_width() // 2, 390))
+
     def draw(self):
-        """Draw the game dynamically based on viewport, theme, and animations."""
+        """Draw the game, menus, levels, and gameplay."""
+        if self.screen_mode == "menu":
+            self.virtual_screen = pygame.Surface((400, 490))
+            self.draw_menu()
+            self._present_virtual(self.virtual_screen, 400, 490)
+            return
+        if self.screen_mode == "levels":
+            self.virtual_screen = pygame.Surface((400, 490))
+            self.draw_levels()
+            self._present_virtual(self.virtual_screen, 400, 490)
+            return
+        if self.screen_mode == "leaderboard":
+            self.virtual_screen = pygame.Surface((400, 490))
+            self.draw_leaderboard_screen()
+            self._present_virtual(self.virtual_screen, 400, 490)
+            return
+
         # 1. Determine orientation and dynamic virtual size
         screen_w, screen_h = self.screen.get_size()
         is_landscape = self.show_dpad and (screen_w > screen_h)
@@ -682,16 +1081,31 @@ class SnakeGame:
             g_center_x = g_food_x + CELL_SIZE // 2
             g_center_y = g_food_y + CELL_SIZE // 2
 
-            draw_golden = True
-            if self.golden_food_timer < 20 and (self.golden_food_timer // 2) % 2 == 0:
-                draw_golden = False
+            # Drawn steadily every frame — no blinking/flashing
+            pygame.draw.circle(v_screen, (255, 215, 0), (g_center_x, g_center_y), CELL_SIZE // 2 - 2)
+            pygame.draw.circle(v_screen, (218, 165, 32), (g_center_x, g_center_y), CELL_SIZE // 2 - 2, 2)
+            pygame.draw.circle(v_screen, WHITE, (g_center_x - 3, g_center_y - 3), 2)
+            pygame.draw.line(v_screen, (100, 150, 50), (g_center_x, g_center_y - CELL_SIZE // 2 + 1), (g_center_x + 2, g_center_y - CELL_SIZE // 2 - 2), 2)
+            pygame.draw.circle(v_screen, GREEN, (g_center_x + 3, g_center_y - CELL_SIZE // 2 - 1), 2)
 
-            if draw_golden:
-                pygame.draw.circle(v_screen, (255, 215, 0), (g_center_x, g_center_y), CELL_SIZE // 2 - 2)
-                pygame.draw.circle(v_screen, (218, 165, 32), (g_center_x, g_center_y), CELL_SIZE // 2 - 2, 2)
-                pygame.draw.circle(v_screen, WHITE, (g_center_x - 3, g_center_y - 3), 2)
-                pygame.draw.line(v_screen, (100, 150, 50), (g_center_x, g_center_y - CELL_SIZE // 2 + 1), (g_center_x + 2, g_center_y - CELL_SIZE // 2 - 2), 2)
-                pygame.draw.circle(v_screen, GREEN, (g_center_x + 3, g_center_y - CELL_SIZE // 2 - 1), 2)
+        # Draw level obstacles
+        for obstacle in self.obstacles:
+            ox = board_offset_x + obstacle.x * CELL_SIZE
+            oy = board_offset_y + obstacle.y * CELL_SIZE
+            pygame.draw.rect(v_screen, (130, 60, 30), (ox + 2, oy + 2, CELL_SIZE - 4, CELL_SIZE - 4), 0, 4)
+            pygame.draw.rect(v_screen, BLACK, (ox + 2, oy + 2, CELL_SIZE - 4, CELL_SIZE - 4), 1, 4)
+
+        # Draw red worm apple
+        if self.worm_food is not None:
+            wx = board_offset_x + self.worm_food.x * CELL_SIZE
+            wy = board_offset_y + self.worm_food.y * CELL_SIZE
+            wcx, wcy = wx + CELL_SIZE // 2, wy + CELL_SIZE // 2
+            pygame.draw.circle(v_screen, (220, 0, 0), (wcx, wcy), CELL_SIZE // 2 - 2)
+            pygame.draw.circle(v_screen, BLACK, (wcx, wcy), CELL_SIZE // 2 - 2, 1)
+            # Stem and worm head
+            pygame.draw.line(v_screen, (100, 150, 50), (wcx, wcy - 8), (wcx + 3, wcy - 12), 2)
+            pygame.draw.circle(v_screen, (120, 200, 80), (wcx + 5, wcy - 12), 3)
+            pygame.draw.circle(v_screen, BLACK, (wcx + 6, wcy - 13), 1)
 
         # Draw play zone boundary border
         pygame.draw.rect(v_screen, border_c, (board_offset_x, board_offset_y, PLAY_ZONE_HEIGHT, PLAY_ZONE_HEIGHT), 1)
@@ -707,18 +1121,18 @@ class SnakeGame:
 
         highscore_text = self.font.render(f"High: {self.high_score}", True, theme_gold)
         v_screen.blit(highscore_text, (board_offset_x + PLAY_ZONE_HEIGHT - highscore_text.get_width() - 15, 12))
+        mode_label = "FREE MODE" if self.game_mode == "free" else f"LEVEL {self.level}"
+        mode_text = self.footer_font.render(mode_label, True, GOLD)
+        v_screen.blit(mode_text, (board_offset_x + PLAY_ZONE_HEIGHT // 2 - mode_text.get_width() // 2, 5))
 
         speed_text = self.small_font.render(f"Speed: {self.current_fps} FPS", True, TEXT_LIGHT)
         v_screen.blit(speed_text, (v_width // 2 - speed_text.get_width() // 2, 20))
 
-        # 4. Draw D-PAD / Controller buttons
+        # 4. Draw D-PAD / Joystick / Controller buttons
         if self.show_dpad:
+            cx, cy, px, py, toggle_rect = self.get_controller_layout()
+
             if is_landscape:
-                cx = 60
-                cy = 245
-                px = 580
-                py = cy
-                
                 # Side plates background
                 pygame.draw.rect(v_screen, BAR_BG, (0, 0, 120, v_height))
                 pygame.draw.rect(v_screen, BAR_BG, (520, 0, 120, v_height))
@@ -726,41 +1140,48 @@ class SnakeGame:
                 pygame.draw.line(v_screen, BORDER_COLOR, (520, 0), (520, v_height), 1)
             else:
                 controller_y = HEADER_HEIGHT + PLAY_ZONE_HEIGHT
-                cx = 120
-                cy = controller_y + CONTROLLER_HEIGHT // 2
-                px = 280
-                py = cy
-                
                 pygame.draw.rect(v_screen, BAR_BG, (0, controller_y, v_width, CONTROLLER_HEIGHT))
                 pygame.draw.line(v_screen, BORDER_COLOR, (0, controller_y), (v_width, controller_y), 1)
 
-            # Draw DPAD cross background
-            pygame.draw.rect(v_screen, (30, 30, 30), (cx - 45, cy - 45, 90, 90), 0, 10)
-            pygame.draw.circle(v_screen, (40, 40, 40), (cx, cy), 15)
+            mode = self.effective_control_mode()
 
-            # DPAD Button colors
-            up_color = GREEN if (self.direction == Direction.UP and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
-            down_color = GREEN if (self.direction == Direction.DOWN and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
-            left_color = GREEN if (self.direction == Direction.LEFT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
-            right_color = GREEN if (self.direction == Direction.RIGHT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+            if mode == "dpad":
+                # Draw DPAD cross background
+                pygame.draw.rect(v_screen, (30, 30, 30), (cx - 45, cy - 45, 90, 90), 0, 10)
+                pygame.draw.circle(v_screen, (40, 40, 40), (cx, cy), 15)
 
-            # Button blocks
-            pygame.draw.rect(v_screen, up_color, (cx - 20, cy - 45, 40, 25), 0, 4)
-            pygame.draw.rect(v_screen, down_color, (cx - 20, cy + 20, 40, 25), 0, 4)
-            pygame.draw.rect(v_screen, left_color, (cx - 45, cy - 20, 25, 40), 0, 4)
-            pygame.draw.rect(v_screen, right_color, (cx + 20, cy - 20, 25, 40), 0, 4)
+                # DPAD Button colors
+                up_color = GREEN if (self.direction == Direction.UP and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+                down_color = GREEN if (self.direction == Direction.DOWN and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+                left_color = GREEN if (self.direction == Direction.LEFT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
+                right_color = GREEN if (self.direction == Direction.RIGHT and not self.paused and not self.is_game_over and not self.inputting_name) else (50, 50, 50)
 
-            # Borders
-            pygame.draw.rect(v_screen, border_c, (cx - 20, cy - 45, 40, 25), 1, 4)
-            pygame.draw.rect(v_screen, border_c, (cx - 20, cy + 20, 40, 25), 1, 4)
-            pygame.draw.rect(v_screen, border_c, (cx - 45, cy - 20, 25, 40), 1, 4)
-            pygame.draw.rect(v_screen, border_c, (cx + 20, cy - 20, 25, 40), 1, 4)
+                # Button blocks
+                pygame.draw.rect(v_screen, up_color, (cx - 20, cy - 45, 40, 25), 0, 4)
+                pygame.draw.rect(v_screen, down_color, (cx - 20, cy + 20, 40, 25), 0, 4)
+                pygame.draw.rect(v_screen, left_color, (cx - 45, cy - 20, 25, 40), 0, 4)
+                pygame.draw.rect(v_screen, right_color, (cx + 20, cy - 20, 25, 40), 0, 4)
 
-            # Indicators
-            pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx, cy - 40), (cx - 8, cy - 26), (cx + 8, cy - 26)])
-            pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx, cy + 40), (cx - 8, cy + 26), (cx + 8, cy + 26)])
-            pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx - 40, cy), (cx - 26, cy - 8), (cx - 26, cy + 8)])
-            pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx + 40, cy), (cx + 26, cy - 8), (cx + 26, cy + 8)])
+                # Borders
+                pygame.draw.rect(v_screen, border_c, (cx - 20, cy - 45, 40, 25), 1, 4)
+                pygame.draw.rect(v_screen, border_c, (cx - 20, cy + 20, 40, 25), 1, 4)
+                pygame.draw.rect(v_screen, border_c, (cx - 45, cy - 20, 25, 40), 1, 4)
+                pygame.draw.rect(v_screen, border_c, (cx + 20, cy - 20, 25, 40), 1, 4)
+
+                # Indicators
+                pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx, cy - 40), (cx - 8, cy - 26), (cx + 8, cy - 26)])
+                pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx, cy + 40), (cx - 8, cy + 26), (cx + 8, cy + 26)])
+                pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx - 40, cy), (cx - 26, cy - 8), (cx - 26, cy + 8)])
+                pygame.draw.polygon(v_screen, TEXT_LIGHT, [(cx + 40, cy), (cx + 26, cy - 8), (cx + 26, cy + 8)])
+            else:
+                # Draw virtual joystick base + knob
+                pygame.draw.circle(v_screen, (30, 30, 30), (cx, cy), self.joystick_radius)
+                pygame.draw.circle(v_screen, border_c, (cx, cy), self.joystick_radius, 2)
+                knob_color = GREEN if self.joystick_active else (90, 90, 90)
+                knob_x = int(cx + self.joystick_offset.x)
+                knob_y = int(cy + self.joystick_offset.y)
+                pygame.draw.circle(v_screen, knob_color, (knob_x, knob_y), 18)
+                pygame.draw.circle(v_screen, TEXT_LIGHT, (knob_x, knob_y), 18, 2)
 
             # Action Button
             pause_button_rect = pygame.Rect(px - 35, py - 20, 70, 40)
@@ -783,9 +1204,19 @@ class SnakeGame:
             action_text_surf = self.small_font.render(action_label, True, BLACK if action_color in (GOLD, GREEN) else TEXT_LIGHT)
             v_screen.blit(action_text_surf, (px - action_text_surf.get_width() // 2, py - action_text_surf.get_height() // 2))
 
+            # Control-mode toggle button (hidden during name entry, which
+            # always forces D-pad for precise letter cycling)
+            if not self.inputting_name:
+                toggle_label = "JOYSTICK" if self.control_mode == "dpad" else "D-PAD"
+                pygame.draw.rect(v_screen, (45, 45, 45), toggle_rect, 0, 6)
+                pygame.draw.rect(v_screen, border_c, toggle_rect, 1, 6)
+                toggle_surf = self.footer_font.render(toggle_label, True, TEXT_LIGHT)
+                v_screen.blit(toggle_surf, (toggle_rect.centerx - toggle_surf.get_width() // 2,
+                                             toggle_rect.centery - toggle_surf.get_height() // 2))
+
         # 5. Draw Footer bar instructions
         instructions = self.footer_font.render(
-            "Swipe/D-Pad/Keys: Move | Pause/Tap Screen to Control",
+            "Swipe/Controls/Keys: Move | Tap Button to Switch Controls",
             True,
             TEXT_LIGHT,
         )
@@ -860,13 +1291,15 @@ class SnakeGame:
 
             game_over_text = self.font.render("GAME OVER", True, RED)
             final_score_text = self.small_font.render(f"Final Score: {self.score}", True, TEXT_LIGHT)
+            personal_text = self.footer_font.render(f"Personal Best: {self.personal_high_score}", True, GREEN)
             leaderboard_title = self.small_font.render("TOP 5 LEADERBOARD", True, GOLD)
 
             card_surface.blit(game_over_text, (card_width // 2 - game_over_text.get_width() // 2, 15))
             card_surface.blit(final_score_text, (card_width // 2 - final_score_text.get_width() // 2, 45))
-            card_surface.blit(leaderboard_title, (card_width // 2 - leaderboard_title.get_width() // 2, 75))
+            card_surface.blit(personal_text, (card_width // 2 - personal_text.get_width() // 2, 65))
+            card_surface.blit(leaderboard_title, (card_width // 2 - leaderboard_title.get_width() // 2, 88))
 
-            start_y = 105
+            start_y = 115
             for index, entry in enumerate(self.leaderboard):
                 rank = index + 1
                 name = entry["name"]
@@ -914,7 +1347,7 @@ class SnakeGame:
 
         while self.running:
             self.handle_events()
-            if not self.paused and not self.is_game_over:
+            if self.screen_mode == "playing" and not self.paused and not self.is_game_over:
                 current_time = pygame.time.get_ticks()
                 update_interval = 1000.0 / self.current_fps
                 if current_time - self.last_update_time >= update_interval:

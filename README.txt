@@ -2,12 +2,26 @@
 
 This is your Pygame Snake game modified so it can be packaged for the web with Pygbag.
 
+## Controls
+
+- Desktop: Arrow keys / WASD to move, Esc or P to pause.
+- Mobile (web): Swipe, or use the on-screen D-pad / joystick. Tap the small
+  "JOYSTICK" / "D-PAD" button next to Pause to switch between the two —
+  your choice is remembered for next time.
+
+## Leaderboard
+
+- On the web build, scores are saved in the browser's localStorage, so
+  they persist across page reloads and repeat visits on the same browser.
+- When running natively on desktop (`python main.py`), scores are saved
+  to `highscore.json` in the project folder instead.
+
 ## Run normally on your computer
 
-Install Pygame:
+Install dependencies from requirements.txt:
 
 ```bash
-python -m pip install pygame
+python -m pip install -r requirements.txt
 ```
 
 Then:

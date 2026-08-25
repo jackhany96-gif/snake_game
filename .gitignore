@@ -1,6 +1,13 @@
 # Python cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
 
 # Local game files
 highscore.json
@@ -9,9 +16,21 @@ highscore.json
 build/
 build-cache/
 
+# Editor files (solo project — remove this line if you start collaborating
+# and want to share VS Code settings/launch configs with others)
+.vscode/
+.idea/
+
 # Agent IDE/system folders
 .gemini/
 brain/
 walkthrough.md
 task.md
 implementation_plan.md
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
