@@ -20,6 +20,7 @@ PLAY_ZONE_HEIGHT = GRID_SIZE * CELL_SIZE
 WINDOW_HEIGHT = PLAY_ZONE_HEIGHT + HEADER_HEIGHT + CONTROLLER_HEIGHT + FOOTER_HEIGHT
 INITIAL_FPS = 5
 MAX_FPS = 15
+DEFAULT_API_URL = "https://snakegame12.pythonanywhere.com"
 
 # Game modes / level settings
 LEVEL_SETTINGS = {
@@ -28,6 +29,7 @@ LEVEL_SETTINGS = {
     3: {"name": "LEVEL 3 - HARD", "fps": 7, "obstacles": 6},
     4: {"name": "LEVEL 4 - VERY HARD", "fps": 8, "obstacles": 9},
     5: {"name": "LEVEL 5 - EXTREME", "fps": 10, "obstacles": 12},
+    6: {"name": "LEVEL 6 - CHAOS", "fps": 12, "obstacles": 16, "inverted": True, "worm_replaces_golden": True},
 }
 
 
@@ -116,10 +118,18 @@ class SnakeGame:
         self.level = 1
         self.obstacles = []
         self.personal_high_score = 0
+        self.logged_in = False
+        self.discord_username = ""
+        self.discord_user_id = ""
+        self.achievements = []
+        self.total_free_apples = 0
+        self.free_games = 0
 
-        # Golden Apple state
+        # Golden Apple / Level 6 special-food state
         self.golden_food = None
         self.golden_food_timer = 0
+        self.worm_food = None
+        self.worm_food_timer = 0
 
         # Swipe and touch controls
         self.swipe_start_pos = None
@@ -143,6 +153,10 @@ class SnakeGame:
         self.prev_snake = list(self.snake)
         self.last_update_time = pygame.time.get_ticks()
 
+        self.load_profile()
+        self.check_browser_login()
+        self.api_base_url = self.get_api_base_url()
+        self.online_sync_task = None
         self.spawn_food()
         self.running = True
 
@@ -157,6 +171,149 @@ class SnakeGame:
             return platform.window.localStorage
         except Exception:
             return None
+
+    def check_browser_login(self):
+        """Read the login result supplied by the Discord OAuth backend.
+        The backend should redirect back to the game with discord_username and
+        discord_user_id after validating the Discord OAuth code."""
+        storage = self._browser_storage()
+        if storage is not None:
+            try:
+                username = storage.getItem("snake_discord_username")
+                user_id = storage.getItem("snake_discord_user_id")
+                if username:
+                    self.discord_username = str(username)
+                    self.discord_user_id = str(user_id or "")
+                    self.logged_in = True
+            except Exception:
+                pass
+
+        # Also accept OAuth callback values in the browser URL. The server must
+        # validate OAuth first; never trust a client-supplied username on a server.
+        try:
+            import platform
+            href = str(platform.window.location.href)
+            if "discord_username=" in href:
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(href).query)
+                username = qs.get("discord_username", [""])[0]
+                user_id = qs.get("discord_user_id", [""])[0]
+                if username:
+                    self.discord_username = username[:32]
+                    self.discord_user_id = user_id[:32]
+                    self.logged_in = True
+                    if storage is not None:
+                        storage.setItem("snake_discord_username", self.discord_username)
+                        storage.setItem("snake_discord_user_id", self.discord_user_id)
+        except Exception:
+            pass
+
+    def get_api_base_url(self):
+        """Read the API host from the page URL, with a local default."""
+        try:
+            import platform
+            from urllib.parse import parse_qs, urlparse
+            query = parse_qs(urlparse(str(platform.window.location.href)).query)
+            configured = query.get("api_url", [DEFAULT_API_URL])[0].strip()
+            return configured.rstrip("/") or DEFAULT_API_URL
+        except Exception:
+            return DEFAULT_API_URL
+
+    async def api_request(self, path, method="GET", payload=None):
+        """Call the Flask API through the browser's asynchronous fetch bridge."""
+        try:
+            import platform
+            options = {"method": method, "credentials": "include"}
+            if payload is not None:
+                options["headers"] = {"Content-Type": "application/json"}
+                options["body"] = json.dumps(payload)
+            response = await platform.window.fetch(self.api_base_url + path, options)
+            if not response.ok:
+                return None
+            return await response.json()
+        except Exception as error:
+            print(f"Online API request failed: {path}: {error}")
+            return None
+
+    async def sync_online_state(self):
+        """Refresh login identity and the global leaderboard without blocking play."""
+        profile = await self.api_request("/api/me")
+        if profile and profile.get("logged_in"):
+            self.logged_in = True
+            self.discord_username = str(profile.get("username", ""))[:32]
+            self.discord_user_id = str(profile.get("discord_id", ""))[:32]
+            self.personal_high_score = max(self.personal_high_score, int(profile.get("best_score", 0)))
+            self.achievements = list(profile.get("achievements", self.achievements))
+            self.save_profile()
+
+        leaderboard = await self.api_request("/api/leaderboard")
+        if isinstance(leaderboard, list):
+            self.leaderboard = leaderboard
+            if self.leaderboard:
+                self.high_score = max(int(entry.get("score", 0)) for entry in self.leaderboard)
+
+    async def submit_online_score(self):
+        """Submit the current Free Mode result and refresh the global board."""
+        result = await self.api_request(
+            "/api/score",
+            method="POST",
+            payload={"score": self.score, "achievements": self.achievements},
+        )
+        if result:
+            self.personal_high_score = max(self.personal_high_score, int(result.get("best_score", 0)))
+            self.achievements = list(result.get("achievements", self.achievements))
+            self.save_profile()
+            leaderboard = await self.api_request("/api/leaderboard")
+            if isinstance(leaderboard, list):
+                self.leaderboard = leaderboard
+                if self.leaderboard:
+                    self.high_score = max(int(entry.get("score", 0)) for entry in self.leaderboard)
+
+    def open_discord_login(self):
+        """Open the configured OAuth login endpoint in a browser tab/window."""
+        login_url = self.api_base_url + "/login"
+        try:
+            import platform
+            platform.window.open(login_url, "_self")
+        except Exception:
+            print("Open Discord login at:", login_url)
+
+    def load_profile(self):
+        storage = self._browser_storage()
+        if storage is None:
+            return
+        try:
+            raw = storage.getItem("snake_profile")
+            if raw:
+                data = json.loads(raw)
+                self.achievements = list(data.get("achievements", []))
+                self.total_free_apples = int(data.get("total_free_apples", 0))
+                self.free_games = int(data.get("free_games", 0))
+                self.personal_high_score = int(data.get("personal_high_score", self.personal_high_score))
+        except Exception:
+            pass
+
+    def save_profile(self):
+        storage = self._browser_storage()
+        if storage is None:
+            return
+        try:
+            storage.setItem("snake_profile", json.dumps({
+                "achievements": self.achievements,
+                "total_free_apples": self.total_free_apples,
+                "free_games": self.free_games,
+                "personal_high_score": self.personal_high_score,
+            }))
+        except Exception:
+            pass
+
+    def award_achievement(self, achievement):
+        if achievement not in self.achievements:
+            self.achievements.append(achievement)
+            self.save_profile()
+
+    def can_play(self):
+        return self.logged_in
 
     def load_leaderboard(self):
         """Load leaderboard and personal best from browser storage or JSON."""
@@ -249,7 +406,8 @@ class SnakeGame:
             y = random.randint(0, GRID_SIZE - 1)
             food_pos = pygame.math.Vector2(x, y)
 
-            if food_pos not in self.snake:
+            if (food_pos not in self.snake and food_pos not in self.obstacles
+                    and food_pos != self.golden_food and food_pos != self.worm_food):
                 self.food = food_pos
                 break
 
@@ -304,13 +462,15 @@ class SnakeGame:
             cx, cy = 60, 245
             px, py = 580, 245
             toggle_rect = pygame.Rect(525, 5, 110, 24)
+            back_rect = pygame.Rect(5, 5, 90, 24)
         else:
             controller_y = HEADER_HEIGHT + PLAY_ZONE_HEIGHT
             cx = 120
             cy = controller_y + CONTROLLER_HEIGHT // 2
             px, py = 280, cy
             toggle_rect = pygame.Rect(400 - 70, controller_y + 5, 60, 24)
-        return cx, cy, px, py, toggle_rect
+            back_rect = pygame.Rect(10, controller_y + 5, 60, 24)
+        return cx, cy, px, py, toggle_rect, back_rect
 
     def get_board_offsets(self):
         screen_w, screen_h = self.screen.get_size()
@@ -339,12 +499,16 @@ class SnakeGame:
         return "dpad" if self.inputting_name else self.control_mode
 
     def get_clicked_button(self, vx, vy):
-        cx, cy, px, py, toggle_rect = self.get_controller_layout()
+        cx, cy, px, py, toggle_rect, back_rect = self.get_controller_layout()
 
         # Toggle button switches control mode (not available while entering
         # a name, since that always uses the D-pad for precision)
         if not self.inputting_name and toggle_rect.collidepoint(vx, vy):
             return "TOGGLE"
+
+        # Back button exits to the main menu, saving progress on the way out
+        if not self.inputting_name and back_rect.collidepoint(vx, vy):
+            return "BACK"
 
         # Check Pause / action button
         if pygame.Rect(px - 35, py - 20, 70, 40).collidepoint(vx, vy):
@@ -386,7 +550,7 @@ class SnakeGame:
             # The score is already known to qualify before this screen appears.
             self.leaderboard.append({"name": self.input_name, "score": self.score})
             self.leaderboard.sort(key=lambda x: x["score"], reverse=True)
-            self.leaderboard = self.leaderboard[:5]
+            # Keep every player in Free Mode instead of limiting the board to 5.
             self.save_leaderboard()
             self.inputting_name = False
             self.screen_mode = "gameover"
@@ -399,7 +563,7 @@ class SnakeGame:
         while len(self.obstacles) < count and attempts < 1000:
             attempts += 1
             pos = pygame.math.Vector2(random.randint(0, GRID_SIZE - 1), random.randint(0, GRID_SIZE - 1))
-            if pos not in self.snake and pos != self.food and pos != self.golden_food and pos not in self.obstacles:
+            if pos not in self.snake and pos != self.food and pos != self.golden_food and pos != self.worm_food and pos not in self.obstacles:
                 # Keep the starting area reasonably clear.
                 if abs(pos.x - 5) + abs(pos.y - 5) > 5:
                     self.obstacles.append(pos)
@@ -410,7 +574,7 @@ class SnakeGame:
             x = random.randint(0, GRID_SIZE - 1)
             y = random.randint(0, GRID_SIZE - 1)
             pos = pygame.math.Vector2(x, y)
-            if pos not in self.snake and pos != self.food and pos != self.golden_food and pos not in self.obstacles:
+            if pos not in self.snake and pos != self.food and pos != self.golden_food and pos != self.worm_food and pos not in self.obstacles:
                 self.worm_food = pos
                 return
 
@@ -428,8 +592,11 @@ class SnakeGame:
         self.golden_food = None
         self.golden_food_timer = 0
         self.worm_food = None
+        self.worm_food_timer = 0
         self.obstacles = []
         self.spawn_obstacles()
+        if mode == "level" and level == 6:
+            self.spawn_worm_apple()
         # Special worm apple appears occasionally during play.
         self.is_game_over = False
         self.paused = False
@@ -440,14 +607,17 @@ class SnakeGame:
         """Handle menu and level-selection buttons."""
         if self.screen_mode == "menu":
             if pygame.Rect(80, 190, 240, 60).collidepoint(vx, vy):
-                self.start_game("free")
+                if self.can_play():
+                    self.start_game("free")
+            elif pygame.Rect(80, 110, 240, 55).collidepoint(vx, vy):
+                self.open_discord_login()
             elif pygame.Rect(80, 270, 240, 60).collidepoint(vx, vy):
                 self.screen_mode = "levels"
             elif pygame.Rect(80, 350, 240, 60).collidepoint(vx, vy):
                 self.screen_mode = "leaderboard"
         elif self.screen_mode == "levels":
-            for i in range(5):
-                if pygame.Rect(55, 90 + i * 70, 290, 55).collidepoint(vx, vy):
+            for i in range(6):
+                if pygame.Rect(55, 70 + i * 62, 290, 55).collidepoint(vx, vy):
                     self.start_game("level", i + 1)
                     return
             if pygame.Rect(10, 10, 100, 40).collidepoint(vx, vy):
@@ -459,6 +629,12 @@ class SnakeGame:
     def handle_direction_change(self, new_dir):
         if self.paused or self.is_game_over or self.inputting_name:
             return
+        # Level 6 reverses all controls: up/down and left/right.
+        if self.game_mode == "level" and self.level == 6:
+            new_dir = {
+                Direction.UP: Direction.DOWN, Direction.DOWN: Direction.UP,
+                Direction.LEFT: Direction.RIGHT, Direction.RIGHT: Direction.LEFT,
+            }[new_dir]
         ref_dir = self.input_queue[-1] if self.input_queue else self.direction
         is_opposite = (
             (new_dir == Direction.RIGHT and ref_dir == Direction.LEFT) or
@@ -507,6 +683,8 @@ class SnakeGame:
                         self.joystick_active = False
                         self.joystick_offset = pygame.math.Vector2(0, 0)
                         self.joystick_last_dir = None
+                    elif button == "BACK":
+                        self.back_to_menu()
                     elif self.inputting_name:
                         if button == "UP":
                             self.change_input_letter(1)
@@ -540,7 +718,7 @@ class SnakeGame:
                 if self.joystick_active and self.effective_control_mode() == "joystick" \
                         and not self.paused and not self.is_game_over and not self.inputting_name:
                     vx, vy = self.screen_to_virtual(event.pos)
-                    cx, cy, _, _, _ = self.get_controller_layout()
+                    cx, cy, _, _, _, _ = self.get_controller_layout()
                     raw = pygame.math.Vector2(vx - cx, vy - cy)
                     dist = raw.length()
 
@@ -597,18 +775,26 @@ class SnakeGame:
                             self.selected_menu = (self.selected_menu + 1) % 3
                         elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
                             if self.selected_menu == 0:
-                                self.start_game("free")
+                                if self.can_play():
+                                    self.start_game("free")
                             elif self.selected_menu == 1:
                                 self.screen_mode = "levels"
                             else:
                                 self.screen_mode = "leaderboard"
                     elif self.screen_mode == "levels":
                         if event.key in (pygame.K_UP, pygame.K_w):
-                            self.level = 1 if self.level >= 5 else self.level + 1
+                            self.level = 1 if self.level >= 6 else self.level + 1
                         elif event.key in (pygame.K_DOWN, pygame.K_s):
-                            self.level = 5 if self.level <= 1 else self.level - 1
+                            self.level = 6 if self.level <= 1 else self.level - 1
                         elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                            self.start_game("level", self.level)
+                            if self.can_play():
+                                self.start_game("level", self.level)
+                    return
+
+                if event.key == pygame.K_b and not self.inputting_name:
+                    # Back out of the current run to the main menu, saving
+                    # progress instead of forcing a full page reload.
+                    self.back_to_menu()
                     return
 
                 if self.inputting_name:
@@ -737,10 +923,19 @@ class SnakeGame:
 
         self.snake.insert(0, new_head)
 
-        # Check if snake ate the red worm apple first.
-        if self.worm_food is not None and new_head == self.worm_food:
+        # Level 6: the worm apple takes the golden apple's role.
+        if self.game_mode == "level" and self.level == 6 and self.worm_food is not None and new_head == self.worm_food:
+            self.score += 30
+            bx, by = self.get_board_offsets()
+            wx = bx + self.worm_food.x * CELL_SIZE + CELL_SIZE // 2
+            wy = by + self.worm_food.y * CELL_SIZE + CELL_SIZE // 2
+            self.spawn_particles(wx, wy, GOLD)
+            self.worm_food = None
+            self.worm_food_timer = 0
+            self.award_achievement("LEVEL 6 WORM HUNTER")
+        # Normal mode worm apple keeps its existing penalty behavior.
+        elif self.worm_food is not None and new_head == self.worm_food:
             self.score -= 30
-            # The worm apple makes the snake longer despite the score penalty.
             self.snake.extend([self.snake[-1].copy(), self.snake[-1].copy()])
             bx, by = self.get_board_offsets()
             wx = bx + self.worm_food.x * CELL_SIZE + CELL_SIZE // 2
@@ -759,11 +954,12 @@ class SnakeGame:
             self.update_speed()
             if self.score > self.high_score:
                 self.high_score = self.score
-            # Spawn golden apple with 15% chance
-            if random.random() < 0.15 and self.golden_food is None:
-                self.spawn_golden_apple()
-            if random.random() < 0.12 and self.worm_food is None:
-                self.spawn_worm_apple()
+            if self.game_mode == "level" and self.level == 6:
+                if self.worm_food is None and random.random() < 0.20:
+                    self.spawn_worm_apple()
+            else:
+                if random.random() < 0.15 and self.golden_food is None:
+                    self.spawn_golden_apple()
         elif self.golden_food and new_head == self.golden_food:
             self.score += 30
             bx, by = self.get_board_offsets()
@@ -783,7 +979,8 @@ class SnakeGame:
             self.snake.pop()
 
         # Personal best is independent of the leaderboard.
-        if self.score > self.personal_high_score:
+        new_personal_best = self.score > self.personal_high_score
+        if new_personal_best:
             self.personal_high_score = self.score
             self.save_leaderboard()
 
@@ -797,30 +994,62 @@ class SnakeGame:
             x = random.randint(0, GRID_SIZE - 1)
             y = random.randint(0, GRID_SIZE - 1)
             pos = pygame.math.Vector2(x, y)
-            if pos not in self.snake and pos != self.food:
+            if pos not in self.snake and pos != self.food and pos != self.worm_food and pos not in self.obstacles:
                 self.golden_food = pos
                 self.golden_food_timer = 60  # 60 frames countdown
                 break
+
+    def submit_free_mode_result(self, new_personal_best):
+        """Record a Free Mode run under the player's Discord username, on
+        the shared leaderboard. Used both for a natural game over and for
+        backing out of a run early (see back_to_menu)."""
+        self.free_games += 1
+        if new_personal_best:
+            self.award_achievement("NEW PERSONAL BEST")
+        self.save_profile()
+        # A persistent/global leaderboard should be written by the Discord-backed server.
+        # The leaderboard name always comes from the logged-in Discord
+        # username - players never type/pick their own leaderboard name.
+        player_name = self.discord_username or "UNKNOWN"
+        existing = next((e for e in self.leaderboard if e.get("name") == player_name), None)
+        if existing is None:
+            self.leaderboard.append({"name": player_name, "score": self.score, "achievements": list(self.achievements)})
+        else:
+            existing["score"] = max(int(existing.get("score", 0)), self.score)
+            existing["achievements"] = sorted(set(existing.get("achievements", [])) | set(self.achievements))
+        self.leaderboard.sort(key=lambda x: x.get("score", 0), reverse=True)
+        self.save_leaderboard()
+        self.online_sync_task = asyncio.create_task(self.submit_online_score())
 
     def game_over(self):
         """Handle game over."""
         print(f"Game Over! Final Score: {self.score}")
         print(f"Final Speed: {self.current_fps} FPS")
-        if self.score > self.personal_high_score:
+        new_personal_best = self.score > self.personal_high_score
+        if new_personal_best:
             self.personal_high_score = self.score
             self.save_leaderboard()
-        # Only Free Mode can enter the shared leaderboard, and only when the
-        # score is higher than the current lowest qualifying score.
-        qualifies = (
-            self.game_mode == "free"
-            and (len(self.leaderboard) < 5 or self.score > self.leaderboard[-1]["score"])
-        )
-        if qualifies:
-            self.inputting_name = True
-            self.input_name = "AAA"
-            self.name_input_index = 0
+        # Only Free Mode can enter the shared leaderboard.
+        if self.game_mode == "free":
+            self.submit_free_mode_result(new_personal_best)
         self.is_game_over = True
         self.screen_mode = "playing"
+
+    def back_to_menu(self):
+        """Leave the current run and return to the main menu without a
+        page reload. Free Mode progress is saved to the leaderboard just
+        like a normal game over; Level runs just keep the personal best."""
+        if not self.is_game_over:
+            new_personal_best = self.score > self.personal_high_score
+            if new_personal_best:
+                self.personal_high_score = self.score
+                self.save_leaderboard()
+            if self.game_mode == "free" and self.score > 0:
+                self.submit_free_mode_result(new_personal_best)
+        self.paused = False
+        self.is_game_over = False
+        self.inputting_name = False
+        self.screen_mode = "menu"
 
     def reset_game(self):
         """Restart the current mode/level."""
@@ -915,20 +1144,33 @@ class SnakeGame:
     def draw_menu(self):
         self.virtual_screen.fill(DARK_BG)
         title = self.font.render("SNAKE", True, GREEN)
-        self.virtual_screen.blit(title, (200 - title.get_width() // 2, 60))
-        subtitle = self.small_font.render("Choose a game mode", True, TEXT_LIGHT)
-        self.virtual_screen.blit(subtitle, (200 - subtitle.get_width() // 2, 110))
+        self.virtual_screen.blit(title, (200 - title.get_width() // 2, 35))
+        if self.logged_in:
+            user_text = self.small_font.render(f"Discord: {self.discord_username}", True, GOLD)
+            self.virtual_screen.blit(user_text, (200 - user_text.get_width() // 2, 80))
+        else:
+            login_text = self.small_font.render("LOGIN REQUIRED", True, RED)
+            self.virtual_screen.blit(login_text, (200 - login_text.get_width() // 2, 80))
+        login_rect = pygame.Rect(80, 110, 240, 55)
+        pygame.draw.rect(self.virtual_screen, BLUE if not self.logged_in else BAR_BG, login_rect, 0, 10)
+        pygame.draw.rect(self.virtual_screen, TEXT_LIGHT, login_rect, 2, 10)
+        login_label = "DISCORD LOGIN" if not self.logged_in else "DISCORD CONNECTED"
+        text = self.small_font.render(login_label, True, TEXT_LIGHT)
+        self.virtual_screen.blit(text, (login_rect.centerx - text.get_width() // 2, login_rect.centery - text.get_height() // 2))
         labels = ["FREE MODE", "LEVELS", "LEADERBOARD"]
         for i, label in enumerate(labels):
-            rect = pygame.Rect(80, 190 + i * 80, 240, 60)
+            rect = pygame.Rect(80, 180 + i * 80, 240, 60)
             selected = i == self.selected_menu
-            pygame.draw.rect(self.virtual_screen, GREEN if selected else BAR_BG, rect, 0, 10)
+            enabled = self.logged_in or i == 2
+            pygame.draw.rect(self.virtual_screen, GREEN if selected and enabled else BAR_BG, rect, 0, 10)
             pygame.draw.rect(self.virtual_screen, TEXT_LIGHT, rect, 2, 10)
-            text = self.font.render(label, True, BLACK if selected else TEXT_LIGHT)
+            text = self.font.render(label, True, BLACK if selected and enabled else TEXT_LIGHT)
             self.virtual_screen.blit(text, (rect.centerx - text.get_width() // 2, rect.centery - text.get_height() // 2))
-        personal = self.small_font.render(f"Personal High Score: {self.personal_high_score}", True, GOLD)
-        self.virtual_screen.blit(personal, (200 - personal.get_width() // 2, 445))
-        hint = self.footer_font.render("Use UP/DOWN + ENTER, or tap a button", True, TEXT_LIGHT)
+        personal = self.small_font.render(f"Personal Best: {self.personal_high_score}", True, GOLD)
+        self.virtual_screen.blit(personal, (200 - personal.get_width() // 2, 425))
+        ach = self.footer_font.render(f"Achievements: {len(self.achievements)}", True, TEXT_LIGHT)
+        self.virtual_screen.blit(ach, (200 - ach.get_width() // 2, 452))
+        hint = self.footer_font.render("Discord login is required to play", True, TEXT_LIGHT)
         self.virtual_screen.blit(hint, (200 - hint.get_width() // 2, 475))
 
     def draw_levels(self):
@@ -940,14 +1182,14 @@ class SnakeGame:
         self.virtual_screen.blit(back_text, (back.centerx - back_text.get_width() // 2, back.centery - back_text.get_height() // 2))
         title = self.font.render("CHOOSE LEVEL", True, GOLD)
         self.virtual_screen.blit(title, (200 - title.get_width() // 2, 25))
-        for i in range(1, 6):
-            rect = pygame.Rect(55, 90 + (i - 1) * 70, 290, 55)
+        for i in range(1, 7):
+            rect = pygame.Rect(55, 65 + (i - 1) * 62, 290, 55)
             selected = i == self.level
             pygame.draw.rect(self.virtual_screen, GREEN if selected else BAR_BG, rect, 0, 8)
             pygame.draw.rect(self.virtual_screen, TEXT_LIGHT, rect, 2, 8)
             text = self.small_font.render(LEVEL_SETTINGS[i]["name"], True, BLACK if selected else TEXT_LIGHT)
             self.virtual_screen.blit(text, (rect.centerx - text.get_width() // 2, rect.centery - text.get_height() // 2))
-        hint = self.footer_font.render("Level 1 is easiest - Level 5 is hardest", True, TEXT_LIGHT)
+        hint = self.footer_font.render("Level 6: inverted controls + worm golden apple", True, GOLD)
         self.virtual_screen.blit(hint, (200 - hint.get_width() // 2, 455))
 
     def draw_leaderboard_screen(self):
@@ -957,13 +1199,18 @@ class SnakeGame:
         pygame.draw.rect(self.virtual_screen, BORDER_COLOR, back, 1, 6)
         back_text = self.small_font.render("BACK", True, TEXT_LIGHT)
         self.virtual_screen.blit(back_text, (back.centerx - back_text.get_width() // 2, back.centery - back_text.get_height() // 2))
-        title = self.font.render("TOP 5 LEADERBOARD", True, GOLD)
-        self.virtual_screen.blit(title, (200 - title.get_width() // 2, 70))
-        for index, entry in enumerate(self.leaderboard):
-            text = self.small_font.render(f"{index + 1}. {entry['name']}   {entry['score']}", True, TEXT_LIGHT)
-            self.virtual_screen.blit(text, (200 - text.get_width() // 2, 140 + index * 45))
-        personal = self.font.render(f"Personal Best: {self.personal_high_score}", True, GREEN)
-        self.virtual_screen.blit(personal, (200 - personal.get_width() // 2, 390))
+        title = self.font.render("FREE MODE LEADERBOARD", True, GOLD)
+        self.virtual_screen.blit(title, (200 - title.get_width() // 2, 55))
+        y = 105
+        for index, entry in enumerate(self.leaderboard[:14]):
+            name = entry.get("name", "UNKNOWN")[:14]
+            score = entry.get("score", 0)
+            ach = len(entry.get("achievements", []))
+            text = self.footer_font.render(f"{index + 1}. {name}   {score}   Ach:{ach}", True, TEXT_LIGHT)
+            self.virtual_screen.blit(text, (12, y))
+            y += 25
+        personal = self.small_font.render(f"Your achievements: {len(self.achievements)}", True, GREEN)
+        self.virtual_screen.blit(personal, (200 - personal.get_width() // 2, 455))
 
     def draw(self):
         """Draw the game, menus, levels, and gameplay."""
@@ -1095,12 +1342,13 @@ class SnakeGame:
             pygame.draw.rect(v_screen, (130, 60, 30), (ox + 2, oy + 2, CELL_SIZE - 4, CELL_SIZE - 4), 0, 4)
             pygame.draw.rect(v_screen, BLACK, (ox + 2, oy + 2, CELL_SIZE - 4, CELL_SIZE - 4), 1, 4)
 
-        # Draw red worm apple
+        # Draw worm apple. In Level 6 it replaces the golden apple role.
         if self.worm_food is not None:
             wx = board_offset_x + self.worm_food.x * CELL_SIZE
             wy = board_offset_y + self.worm_food.y * CELL_SIZE
             wcx, wcy = wx + CELL_SIZE // 2, wy + CELL_SIZE // 2
-            pygame.draw.circle(v_screen, (220, 0, 0), (wcx, wcy), CELL_SIZE // 2 - 2)
+            worm_color = GOLD if (self.game_mode == "level" and self.level == 6) else (220, 0, 0)
+            pygame.draw.circle(v_screen, worm_color, (wcx, wcy), CELL_SIZE // 2 - 2)
             pygame.draw.circle(v_screen, BLACK, (wcx, wcy), CELL_SIZE // 2 - 2, 1)
             # Stem and worm head
             pygame.draw.line(v_screen, (100, 150, 50), (wcx, wcy - 8), (wcx + 3, wcy - 12), 2)
@@ -1130,7 +1378,7 @@ class SnakeGame:
 
         # 4. Draw D-PAD / Joystick / Controller buttons
         if self.show_dpad:
-            cx, cy, px, py, toggle_rect = self.get_controller_layout()
+            cx, cy, px, py, toggle_rect, back_rect = self.get_controller_layout()
 
             if is_landscape:
                 # Side plates background
@@ -1214,9 +1462,18 @@ class SnakeGame:
                 v_screen.blit(toggle_surf, (toggle_rect.centerx - toggle_surf.get_width() // 2,
                                              toggle_rect.centery - toggle_surf.get_height() // 2))
 
+            # Back button - next to the pause/action button. Exits to the
+            # main menu and saves progress instead of forcing a reload.
+            if not self.inputting_name:
+                pygame.draw.rect(v_screen, (45, 45, 45), back_rect, 0, 6)
+                pygame.draw.rect(v_screen, border_c, back_rect, 1, 6)
+                back_surf = self.footer_font.render("BACK", True, TEXT_LIGHT)
+                v_screen.blit(back_surf, (back_rect.centerx - back_surf.get_width() // 2,
+                                           back_rect.centery - back_surf.get_height() // 2))
+
         # 5. Draw Footer bar instructions
         instructions = self.footer_font.render(
-            "Swipe/Controls/Keys: Move | Tap Button to Switch Controls",
+            "Swipe/Keys: Move | Tap BACK or Press B to Exit",
             True,
             TEXT_LIGHT,
         )
@@ -1344,6 +1601,7 @@ class SnakeGame:
     async def run(self):
         """Main game loop compatible with Pygbag/web browsers."""
         self.last_update_time = pygame.time.get_ticks()
+        self.online_sync_task = asyncio.create_task(self.sync_online_state())
 
         while self.running:
             self.handle_events()
@@ -1354,11 +1612,17 @@ class SnakeGame:
                     self.move_snake()
                     self.last_update_time = current_time
 
-                    # Decrement golden food timer
+                    # Special food timers. Level 6's worm replaces the golden apple.
                     if self.golden_food is not None:
                         self.golden_food_timer -= 1
                         if self.golden_food_timer <= 0:
                             self.golden_food = None
+                    if self.game_mode == "level" and self.level == 6 and self.worm_food is not None:
+                        self.worm_food_timer += 1
+                        if self.worm_food_timer >= 120:
+                            self.worm_food = None
+                            self.worm_food_timer = 0
+                            self.spawn_worm_apple()
             self.draw()
             self.clock.tick(60)
 

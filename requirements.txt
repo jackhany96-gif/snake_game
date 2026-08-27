@@ -1,1 +1,4 @@
 pygame
+Flask
+flask-cors
+requests
